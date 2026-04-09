@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.1.1"
+SCRIPT_VERSION="3.1.0"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -922,7 +922,7 @@ _xray_menu() {
             8) _view_xray_nodes; _pause ;;
             9) _delete_xray_node; _pause ;;
             10) _modify_xray_port; _pause ;;
-            11) _update_script_self; _pause ;;
+            11) _update_script_self; _pause; exit 0 ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
