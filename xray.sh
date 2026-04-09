@@ -189,11 +189,11 @@ _atomic_modify_json() {
 
 _get_meminfo_total_mb() {
     local total_mem_mb=0
-    if command -v free >/dev/null 2>&1; then
-        total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-    fi
+    total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
     if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+        if command -v free >/dev/null 2>&1; then
+            total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+        fi
     fi
     if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
         total_mem_mb=128
@@ -201,27 +201,72 @@ _get_meminfo_total_mb() {
     echo "$total_mem_mb"
 }
 
-_get_cgroup_limit_mb() {
-    local path raw bytes mb
-    for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+_is_likely_container() {
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -cq >/dev/null 2>&1; then
+        return 0
+    fi
+    grep -qaE '(lxc|docker|container|kubepods|podman)' /proc/1/environ /proc/1/cgroup 2>/dev/null && return 0
+    return 1
+}
+
+_read_first_cgroup_value() {
+    local mode="$1" path raw bytes mb
+    shift
+    for path in "$@"; do
+        [ -n "$path" ] || continue
         [ -r "$path" ] || continue
         raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
         [ -n "$raw" ] || continue
-        [ "$raw" = "max" ] && continue
-        [[ "$raw" =~ ^[0-9]+$ ]] || continue
-
-        # 忽略 cgroup v1 常见的“近似无限制”哨兵值
-        if [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
+        if [ "$mode" = "limit" ] && [ "$raw" = "max" ]; then
             continue
         fi
-
+        [[ "$raw" =~ ^[0-9]+$ ]] || continue
+        if [ "$mode" = "limit" ] && [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
+            continue
+        fi
         bytes=$raw
         mb=$((bytes / 1024 / 1024))
-        [ "$mb" -gt 0 ] || continue
+        [ "$mb" -ge 0 ] || continue
+        if [ "$mode" = "limit" ] && [ "$mb" -le 0 ]; then
+            continue
+        fi
         echo "$mb"
         return 0
     done
     return 1
+}
+
+_get_cgroup_limit_mb() {
+    local cg2_rel cg1_rel mp paths=()
+
+    paths+=(/sys/fs/cgroup/memory.max)
+    paths+=(/sys/fs/cgroup/memory/memory.limit_in_bytes)
+
+    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
+    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
+
+    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
+        paths+=("/sys/fs/cgroup${cg2_rel}/memory.max")
+    fi
+    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
+        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes")
+        paths+=("/sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes")
+    fi
+
+    while IFS= read -r mp; do
+        [ -n "$mp" ] || continue
+        paths+=("${mp}/memory.max")
+        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.max")
+    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
+
+    while IFS= read -r mp; do
+        [ -n "$mp" ] || continue
+        paths+=("${mp}/memory.limit_in_bytes")
+        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.limit_in_bytes")
+    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
+
+    _read_first_cgroup_value limit $(printf '%s
+' "${paths[@]}" | awk '!seen[$0]++')
 }
 
 _get_effective_total_mem_mb() {
@@ -229,37 +274,76 @@ _get_effective_total_mem_mb() {
     meminfo_mb=$(_get_meminfo_total_mb)
     cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
 
-    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ] && [ "$cgroup_mb" -lt "$meminfo_mb" ]; then
+    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ]; then
         echo "$cgroup_mb"
-    else
-        echo "$meminfo_mb"
+        return 0
     fi
+
+    if _is_likely_container && [ "$meminfo_mb" -gt 512 ]; then
+        _warn "未可靠识别到容器内存限制，当前 /proc/meminfo 显示 ${meminfo_mb}MB；为避免误判宿主机内存，保守回退到 512MB。"
+        echo 512
+        return 0
+    fi
+
+    echo "$meminfo_mb"
 }
 
 _get_cgroup_current_mb() {
-    local path raw bytes mb
-    for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes; do
-        [ -r "$path" ] || continue
-        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
-        [ -n "$raw" ] || continue
-        [[ "$raw" =~ ^[0-9]+$ ]] || continue
-        bytes=$raw
-        mb=$((bytes / 1024 / 1024))
-        [ "$mb" -ge 0 ] || continue
-        echo "$mb"
+    local cg2_rel cg1_rel mp paths=() current_est
+
+    paths+=(/sys/fs/cgroup/memory.current)
+    paths+=(/sys/fs/cgroup/memory/memory.usage_in_bytes)
+
+    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
+    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
+
+    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
+        paths+=("/sys/fs/cgroup${cg2_rel}/memory.current")
+    fi
+    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
+        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes")
+        paths+=("/sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes")
+    fi
+
+    while IFS= read -r mp; do
+        [ -n "$mp" ] || continue
+        paths+=("${mp}/memory.current")
+        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.current")
+    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
+
+    while IFS= read -r mp; do
+        [ -n "$mp" ] || continue
+        paths+=("${mp}/memory.usage_in_bytes")
+        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.usage_in_bytes")
+    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
+
+    if _read_first_cgroup_value current $(printf '%s
+' "${paths[@]}" | awk '!seen[$0]++'); then
         return 0
-    done
+    fi
+
+    current_est=$(awk '/MemTotal:/{t=$2}/MemAvailable:/{a=$2} END{if(t>0 && a>=0 && t>=a) print int((t-a)/1024)}' /proc/meminfo 2>/dev/null)
+    if [[ "$current_est" =~ ^[0-9]+$ ]] && [ "$current_est" -ge 0 ]; then
+        echo "$current_est"
+        return 0
+    fi
+
     return 1
 }
 
 # 智能 GOMEMLIMIT 计算：
 # 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
-# 2) 结合 cgroup current/usage 估算容器当前压力，而不是固定分档。
-# 3) 为内核、页缓存、socket/TLS 缓冲动态预留空间。
+# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
+# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
 # 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
 _get_mem_limit() {
     local total_mem_mb current_mem_mb reserve_floor_mb reserve_ratio_mb pressure_reserve_mb
-    local hard_cap_mb dynamic_cap_mb limit
+    local hard_cap_mb dynamic_cap_mb limit min_limit_mb
+
+    if [[ "${XRAY_GOMEMLIMIT_MB:-}" =~ ^[0-9]+$ ]] && [ "${XRAY_GOMEMLIMIT_MB}" -gt 0 ]; then
+        echo "${XRAY_GOMEMLIMIT_MB}"
+        return 0
+    fi
 
     total_mem_mb=$(_get_effective_total_mem_mb)
     current_mem_mb=$(_get_cgroup_current_mb 2>/dev/null || true)
@@ -267,16 +351,17 @@ _get_mem_limit() {
     if ! [[ "$current_mem_mb" =~ ^[0-9]+$ ]] || [ "$current_mem_mb" -lt 0 ]; then
         current_mem_mb=0
     fi
+    [ "$current_mem_mb" -gt "$total_mem_mb" ] && current_mem_mb="$total_mem_mb"
 
-    reserve_floor_mb=32
-    reserve_ratio_mb=$((total_mem_mb / 8))
+    reserve_floor_mb=48
+    reserve_ratio_mb=$((total_mem_mb / 6))
     [ "$reserve_ratio_mb" -lt "$reserve_floor_mb" ] && reserve_ratio_mb=$reserve_floor_mb
 
-    # 容器当前占用越高，给系统多留一点动态余量，避免把 cgroup 吃满。
-    pressure_reserve_mb=$((current_mem_mb / 4))
-    [ "$pressure_reserve_mb" -gt $((total_mem_mb / 4)) ] && pressure_reserve_mb=$((total_mem_mb / 4))
+    # 当前容器占用越高，额外余量越大，避免把 cgroup 顶满。
+    pressure_reserve_mb=$((current_mem_mb / 3))
+    [ "$pressure_reserve_mb" -gt $((total_mem_mb / 3)) ] && pressure_reserve_mb=$((total_mem_mb / 3))
 
-    hard_cap_mb=$((total_mem_mb * 85 / 100))
+    hard_cap_mb=$((total_mem_mb * 80 / 100))
     dynamic_cap_mb=$((total_mem_mb - reserve_ratio_mb - pressure_reserve_mb))
 
     if [ "$dynamic_cap_mb" -lt "$hard_cap_mb" ]; then
@@ -285,9 +370,9 @@ _get_mem_limit() {
         limit=$hard_cap_mb
     fi
 
-    # 确保至少留出极小的系统余量，同时避免过低导致 GC 过于激进。
-    [ "$limit" -gt $((total_mem_mb - 8)) ] && limit=$((total_mem_mb - 8))
-    [ "$limit" -lt 16 ] && limit=16
+    min_limit_mb=40
+    [ "$limit" -gt $((total_mem_mb - 12)) ] && limit=$((total_mem_mb - 12))
+    [ "$limit" -lt "$min_limit_mb" ] && limit=$min_limit_mb
 
     echo "$limit"
 }
@@ -363,9 +448,6 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    local mem_limit_mb
-    mem_limit_mb=$(_get_mem_limit)
-
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -373,8 +455,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-Environment="GOMEMLIMIT=${mem_limit_mb}MiB"
-ExecStart=${XRAY_BIN} run -c ${XRAY_CONFIG}
+ExecStart=/bin/sh -c 'limit=$(${SCRIPT_INSTALL_PATH} --print-mem-limit 2>/dev/null || echo 64); exec env GOMEMLIMIT=${limit}MiB ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
@@ -388,17 +469,14 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    local mem_limit_mb
-    mem_limit_mb=$(_get_mem_limit)
     touch "${XRAY_LOG}" 2>/dev/null || true
 
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
-command="${XRAY_BIN}"
-command_args="run -c ${XRAY_CONFIG}"
+command="/bin/sh"
+command_args="-c 'limit=$(${SCRIPT_INSTALL_PATH} --print-mem-limit 2>/dev/null || echo 64); exec env GOMEMLIMIT=${limit}MiB ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
 supervisor="supervise-daemon"
-supervise_daemon_args="--env GOMEMLIMIT=${mem_limit_mb}MiB"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
@@ -790,7 +868,7 @@ _uninstall_script() {
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
     echo ""
 
-    read -p "$(echo -e ${YELLOW}"确定要执行卸载吗? (y/N): "${NC})" confirm_main
+    read -p "$(echo -e ${YELLOW}"确定要执行卸载吗? (y/N): "${NC})" confirm_main "$@"
     [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && _info "卸载已取消。" && return
 
     _info "正在停止并清理 Xray ..."
@@ -879,7 +957,17 @@ _xray_menu() {
     done
 }
 
+_maybe_handle_internal_subcommand() {
+    case "${1:-}" in
+        --print-mem-limit)
+            _get_mem_limit
+            exit 0
+            ;;
+    esac
+}
+
 _main() {
+    _maybe_handle_internal_subcommand "$1"
     _check_root
     _detect_init_system
     _ensure_deps
@@ -891,4 +979,4 @@ _main() {
     _xray_menu
 }
 
-_main
+_main "$@"
