@@ -4,9 +4,11 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0.2"
-SCRIPT_CMD_NAME="SS2022"
+SCRIPT_VERSION="3.0.3"
+SCRIPT_CMD_NAME="ss2022"
+SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
+SCRIPT_ALIAS_PATH="/usr/local/bin/${SCRIPT_CMD_ALIAS}"
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh"
 SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF_SCRIPT_PATH")" 2>/dev/null && pwd)"
@@ -21,11 +23,29 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+FIRST_MENU_RENDER=1
 
 _info()    { echo -e "${CYAN}[信息] $1${NC}" >&2; }
 _success() { echo -e "${GREEN}[成功] $1${NC}" >&2; }
 _warn()    { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
+
+_pause() {
+    echo ""
+    read -p "按回车键继续..." _
+}
+
+_menu_item() {
+    printf "  ${GREEN}[%-2s]${NC} %s\n" "$1" "$2"
+}
+
+_menu_danger() {
+    printf "  ${RED}[%-2s]${NC} %s\n" "$1" "$2"
+}
+
+_menu_exit() {
+    printf "  ${YELLOW}[%-2s]${NC} %s\n" "$1" "$2"
+}
 
 _check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -79,10 +99,17 @@ _install_script_shortcut() {
     local src
     src="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
     [ -n "$src" ] && [ -f "$src" ] || return 0
-    [ "$src" = "$SCRIPT_INSTALL_PATH" ] && { chmod +x "$SCRIPT_INSTALL_PATH" 2>/dev/null || true; return 0; }
+
+    _info "正在安装/更新脚本快捷指令..."
     mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null || true
-    cp -f "$src" "$SCRIPT_INSTALL_PATH" 2>/dev/null || return 0
+
+    if [ "$src" != "$SCRIPT_INSTALL_PATH" ]; then
+        cp -f "$src" "$SCRIPT_INSTALL_PATH" 2>/dev/null || return 0
+    fi
     chmod +x "$SCRIPT_INSTALL_PATH" 2>/dev/null || true
+
+    ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || cp -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
+    chmod +x "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
 }
 
 _update_script_self() {
@@ -128,8 +155,11 @@ _update_script_self() {
     fi
 
     rm -f "$tmp"
-    _success "脚本已更新。当前快捷命令: ${SCRIPT_CMD_NAME}"
-    _warn "请重新运行 ${SCRIPT_CMD_NAME} 以加载新版本。"
+    ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || cp -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
+    chmod +x "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
+
+    _success "脚本已更新。当前快捷命令: ${SCRIPT_CMD_NAME} / ${SCRIPT_CMD_ALIAS}"
+    _warn "请重新运行 ${SCRIPT_CMD_NAME} 或 ${SCRIPT_CMD_ALIAS} 以加载新版本。"
 }
 
 _get_public_ip() {
@@ -488,7 +518,9 @@ _add_ss2022_reality() {
 
     _manage_xray_service restart
     _success "SS2022+Reality 节点 [${name}] 添加成功。"
+    echo ""
     echo -e "  ${YELLOW}Quantumult X:${NC} ${qx_link}"
+    echo ""
 }
 
 _view_xray_nodes() {
@@ -629,6 +661,7 @@ _uninstall_script() {
     echo -e "  ${RED}-${NC} Xray 配置目录: ${XRAY_DIR}"
     echo -e "  ${RED}-${NC} Xray 二进制: ${XRAY_BIN}"
     echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_INSTALL_PATH}"
+    [ "$SCRIPT_ALIAS_PATH" != "$SCRIPT_INSTALL_PATH" ] && echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_ALIAS_PATH}"
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
     echo ""
 
@@ -639,7 +672,7 @@ _uninstall_script() {
     _remove_xray_runtime
 
     _info "正在清理快捷命令与脚本本体..."
-    rm -f "$SCRIPT_INSTALL_PATH"
+    rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
     if [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && [ "$SELF_SCRIPT_PATH" != "$SCRIPT_INSTALL_PATH" ]; then
         rm -f "$SELF_SCRIPT_PATH"
     fi
@@ -678,45 +711,49 @@ _show_status_header() {
 
 _xray_menu() {
     while true; do
-        clear
+        if [ "$FIRST_MENU_RENDER" = "1" ]; then
+            FIRST_MENU_RENDER=0
+        else
+            clear
+        fi
         echo ""
         _show_status_header
         echo -e " ${CYAN}【服务控制】${NC}"
-        echo -e "  ${GREEN}[1]${NC} 安装/更新 Xray 内核"
-        echo -e "  ${GREEN}[2]${NC} 启动 Xray"
-        echo -e "  ${GREEN}[3]${NC} 停止 Xray"
-        echo -e "  ${GREEN}[4]${NC} 重启 Xray"
-        echo -e "  ${GREEN}[5]${NC} 查看 Xray 状态"
-        echo -e "  ${GREEN}[6]${NC} 查看 Xray 日志"
+        _menu_item 1  "安装/更新 Xray 内核"
+        _menu_item 2  "启动 Xray"
+        _menu_item 3  "停止 Xray"
+        _menu_item 4  "重启 Xray"
+        _menu_item 5  "查看 Xray 状态"
+        _menu_item 6  "查看 Xray 日志"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        echo -e "  ${GREEN}[7]${NC} 添加 SS2022+Reality 节点"
-        echo -e "  ${GREEN}[8]${NC} 查看所有节点"
-        echo -e "  ${GREEN}[9]${NC} 删除节点"
-        echo -e "  ${GREEN}[10]${NC} 修改节点端口"
-        echo -e "  ${GREEN}[11]${NC} 更新脚本"
+        _menu_item 7  "添加 SS2022+Reality 节点"
+        _menu_item 8  "查看所有节点"
+        _menu_item 9  "删除节点"
+        _menu_item 10 "修改节点端口"
+        _menu_item 11 "更新脚本"
         echo ""
-        echo -e "  ${RED}[88]${NC} 卸载 Xray"
-        echo -e "  ${RED}[99]${NC} 卸载脚本"
-        echo -e "  ${YELLOW}[0]${NC} 退出脚本"
+        _menu_danger 88 "卸载 Xray"
+        _menu_danger 99 "卸载脚本"
+        _menu_exit 0 "退出脚本"
         echo -e "=================================================="
         read -p "请选择 [0-99]: " choice
         case "$choice" in
-            1) _install_or_update_xray; read -p "按回车键继续..." ;;
-            2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; read -p "按回车键继续..." ;;
-            3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; read -p "按回车键继续..." ;;
-            4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; read -p "按回车键继续..." ;;
-            5) [ -f "$XRAY_BIN" ] && _manage_xray_service status; read -p "按回车键继续..." ;;
+            1) _install_or_update_xray; _pause ;;
+            2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
+            3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
+            4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
+            5) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
             6) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
-            7) _init_xray_config; _add_ss2022_reality; read -p "按回车键继续..." ;;
-            8) _view_xray_nodes; read -p "按回车键继续..." ;;
-            9) _delete_xray_node; read -p "按回车键继续..." ;;
-            10) _modify_xray_port; read -p "按回车键继续..." ;;
-            11) _update_script_self; read -p "按回车键继续..." ;;
-            88) _uninstall_xray; read -p "按回车键继续..." ;;
+            7) _init_xray_config; _add_ss2022_reality; _pause ;;
+            8) _view_xray_nodes; _pause ;;
+            9) _delete_xray_node; _pause ;;
+            10) _modify_xray_port; _pause ;;
+            11) _update_script_self; _pause ;;
+            88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
-            *) _error "无效输入。"; read -p "按回车键继续..." ;;
+            *) _error "无效输入。"; _pause ;;
         esac
     done
 }
@@ -724,9 +761,11 @@ _xray_menu() {
 _main() {
     _check_root
     _detect_init_system
+    _info "正在初始化脚本运行环境..."
     _ensure_deps
     _install_script_shortcut
     [ -f "$XRAY_BIN" ] && _init_xray_config
+    _info "正在启动 SS2022 管理菜单..."
     _xray_menu
 }
 
