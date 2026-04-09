@@ -4,14 +4,13 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0.3"
+SCRIPT_VERSION="3.0.4"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
 SCRIPT_ALIAS_PATH="/usr/local/bin/${SCRIPT_CMD_ALIAS}"
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh"
 SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
-SCRIPT_DIR="$(cd "$(dirname "$SELF_SCRIPT_PATH")" 2>/dev/null && pwd)"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
@@ -23,7 +22,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-FIRST_MENU_RENDER=1
 
 _info()    { echo -e "${CYAN}[信息] $1${NC}" >&2; }
 _success() { echo -e "${GREEN}[成功] $1${NC}" >&2; }
@@ -85,13 +83,7 @@ _ensure_deps() {
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing+=("curl")
     command -v unzip >/dev/null 2>&1 || missing+=("unzip")
-    command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || {
-        if command -v apk >/dev/null 2>&1; then
-            _pkg_install iproute2 net-tools
-        else
-            _pkg_install iproute2 net-tools
-        fi
-    }
+    command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || _pkg_install iproute2 net-tools
     [ ${#missing[@]} -gt 0 ] && _pkg_install "${missing[@]}"
 }
 
@@ -100,7 +92,6 @@ _install_script_shortcut() {
     src="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
     [ -n "$src" ] && [ -f "$src" ] || return 0
 
-    _info "正在安装/更新脚本快捷指令..."
     mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null || true
 
     if [ "$src" != "$SCRIPT_INSTALL_PATH" ]; then
@@ -117,7 +108,6 @@ _update_script_self() {
     local src
     src="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
-    _info "正在从仓库更新脚本..."
     if command -v curl >/dev/null 2>&1; then
         curl -LfsS "$SCRIPT_UPDATE_URL" -o "$tmp" 2>/dev/null || {
             rm -f "$tmp"
@@ -711,11 +701,7 @@ _show_status_header() {
 
 _xray_menu() {
     while true; do
-        if [ "$FIRST_MENU_RENDER" = "1" ]; then
-            FIRST_MENU_RENDER=0
-        else
-            clear
-        fi
+        clear
         echo ""
         _show_status_header
         echo -e " ${CYAN}【服务控制】${NC}"
@@ -761,11 +747,9 @@ _xray_menu() {
 _main() {
     _check_root
     _detect_init_system
-    _info "正在初始化脚本运行环境..."
     _ensure_deps
     _install_script_shortcut
     [ -f "$XRAY_BIN" ] && _init_xray_config
-    _info "正在启动 SS2022 管理菜单..."
     _xray_menu
 }
 
