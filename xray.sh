@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0.4"
+SCRIPT_VERSION="3.1.0"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -15,6 +15,8 @@ XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 XRAY_METADATA="${XRAY_DIR}/metadata.json"
+XRAY_LOG="/var/log/xray.log"
+XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
 
 RED='\033[0;31m'
@@ -27,6 +29,8 @@ _info()    { echo -e "${CYAN}[信息] $1${NC}" >&2; }
 _success() { echo -e "${GREEN}[成功] $1${NC}" >&2; }
 _warn()    { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
+
+trap 'rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
 
 _pause() {
     echo ""
@@ -182,6 +186,112 @@ _atomic_modify_json() {
     fi
 }
 
+
+_get_meminfo_total_mb() {
+    local total_mem_mb=0
+    if command -v free >/dev/null 2>&1; then
+        total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    fi
+    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
+        total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    fi
+    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
+        total_mem_mb=128
+    fi
+    echo "$total_mem_mb"
+}
+
+_get_cgroup_limit_mb() {
+    local path raw bytes mb
+    for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        [ -r "$path" ] || continue
+        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
+        [ -n "$raw" ] || continue
+        [ "$raw" = "max" ] && continue
+        [[ "$raw" =~ ^[0-9]+$ ]] || continue
+
+        # 忽略 cgroup v1 常见的“近似无限制”哨兵值
+        if [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
+            continue
+        fi
+
+        bytes=$raw
+        mb=$((bytes / 1024 / 1024))
+        [ "$mb" -gt 0 ] || continue
+        echo "$mb"
+        return 0
+    done
+    return 1
+}
+
+_get_effective_total_mem_mb() {
+    local meminfo_mb cgroup_mb
+    meminfo_mb=$(_get_meminfo_total_mb)
+    cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
+
+    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ] && [ "$cgroup_mb" -lt "$meminfo_mb" ]; then
+        echo "$cgroup_mb"
+    else
+        echo "$meminfo_mb"
+    fi
+}
+
+_get_cgroup_current_mb() {
+    local path raw bytes mb
+    for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes; do
+        [ -r "$path" ] || continue
+        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
+        [ -n "$raw" ] || continue
+        [[ "$raw" =~ ^[0-9]+$ ]] || continue
+        bytes=$raw
+        mb=$((bytes / 1024 / 1024))
+        [ "$mb" -ge 0 ] || continue
+        echo "$mb"
+        return 0
+    done
+    return 1
+}
+
+# 智能 GOMEMLIMIT 计算：
+# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
+# 2) 结合 cgroup current/usage 估算容器当前压力，而不是固定分档。
+# 3) 为内核、页缓存、socket/TLS 缓冲动态预留空间。
+# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
+_get_mem_limit() {
+    local total_mem_mb current_mem_mb reserve_floor_mb reserve_ratio_mb pressure_reserve_mb
+    local hard_cap_mb dynamic_cap_mb limit
+
+    total_mem_mb=$(_get_effective_total_mem_mb)
+    current_mem_mb=$(_get_cgroup_current_mb 2>/dev/null || true)
+
+    if ! [[ "$current_mem_mb" =~ ^[0-9]+$ ]] || [ "$current_mem_mb" -lt 0 ]; then
+        current_mem_mb=0
+    fi
+
+    reserve_floor_mb=32
+    reserve_ratio_mb=$((total_mem_mb / 8))
+    [ "$reserve_ratio_mb" -lt "$reserve_floor_mb" ] && reserve_ratio_mb=$reserve_floor_mb
+
+    # 容器当前占用越高，给系统多留一点动态余量，避免把 cgroup 吃满。
+    pressure_reserve_mb=$((current_mem_mb / 4))
+    [ "$pressure_reserve_mb" -gt $((total_mem_mb / 4)) ] && pressure_reserve_mb=$((total_mem_mb / 4))
+
+    hard_cap_mb=$((total_mem_mb * 85 / 100))
+    dynamic_cap_mb=$((total_mem_mb - reserve_ratio_mb - pressure_reserve_mb))
+
+    if [ "$dynamic_cap_mb" -lt "$hard_cap_mb" ]; then
+        limit=$dynamic_cap_mb
+    else
+        limit=$hard_cap_mb
+    fi
+
+    # 确保至少留出极小的系统余量，同时避免过低导致 GC 过于激进。
+    [ "$limit" -gt $((total_mem_mb - 8)) ] && limit=$((total_mem_mb - 8))
+    [ "$limit" -lt 16 ] && limit=16
+
+    echo "$limit"
+}
+
 _check_port_occupied() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -224,6 +334,7 @@ _input_port() {
 
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
+    touch "$XRAY_LOG" 2>/dev/null || true
     if [ ! -s "$XRAY_CONFIG" ]; then
         cat > "$XRAY_CONFIG" <<'JSON'
 {
@@ -252,6 +363,9 @@ JSON
 }
 
 _create_xray_systemd_service() {
+    local mem_limit_mb
+    mem_limit_mb=$(_get_mem_limit)
+
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -259,36 +373,51 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
+Environment="GOMEMLIMIT=${mem_limit_mb}MiB"
 ExecStart=${XRAY_BIN} run -c ${XRAY_CONFIG}
 Restart=on-failure
-RestartSec=3
+RestartSec=3s
 LimitNOFILE=65535
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF2
-    systemctl daemon-reload
-    systemctl enable xray >/dev/null 2>&1
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable xray >/dev/null 2>&1 || true
 }
 
 _create_xray_openrc_service() {
+    local mem_limit_mb
+    mem_limit_mb=$(_get_mem_limit)
+    touch "${XRAY_LOG}" 2>/dev/null || true
+
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="${XRAY_BIN}"
 command_args="run -c ${XRAY_CONFIG}"
-pidfile="/run/xray.pid"
-command_background=true
-supervisor=supervise-daemon
+supervisor="supervise-daemon"
+supervise_daemon_args="--env GOMEMLIMIT=${mem_limit_mb}MiB"
+respawn_delay=3
+respawn_max=0
+pidfile="${XRAY_PID_FILE}"
+output_log="${XRAY_LOG}"
+error_log="${XRAY_LOG}"
+
+depend() {
+    need net
+    after firewall
+}
 EOF2
     chmod +x /etc/init.d/xray
-    rc-update add xray default >/dev/null 2>&1
+    rc-update add xray default >/dev/null 2>&1 || true
 }
 
 _create_xray_service() {
     case "$INIT_SYSTEM" in
-        systemd) [ -f /etc/systemd/system/xray.service ] || _create_xray_systemd_service ;;
-        openrc)  [ -f /etc/init.d/xray ] || _create_xray_openrc_service ;;
+        systemd) _create_xray_systemd_service ;;
+        openrc)  _create_xray_openrc_service ;;
         *) _warn "未检测到 systemd/openrc，请手动管理 Xray 进程。" ;;
     esac
 }
@@ -398,8 +527,11 @@ _view_xray_log() {
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         journalctl -u xray -n 50 --no-pager -f
     elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        _warn "OpenRC 环境下请查看 /var/log/messages"
-        tail -f /var/log/messages 2>/dev/null | grep -i xray
+        if [ -f "$XRAY_LOG" ]; then
+            tail -n 50 -f "$XRAY_LOG"
+        else
+            _warn "未找到 ${XRAY_LOG}，请先启动 Xray。"
+        fi
     else
         _warn "未检测到日志管理器。"
     fi
@@ -631,7 +763,7 @@ _remove_xray_runtime() {
         rc-update del xray default >/dev/null 2>&1 || true
         rm -f /etc/init.d/xray
     fi
-    rm -f "$XRAY_BIN"
+    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
 }
 
@@ -752,7 +884,10 @@ _main() {
     _detect_init_system
     _ensure_deps
     _install_script_shortcut
-    [ -f "$XRAY_BIN" ] && _init_xray_config
+    if [ -f "$XRAY_BIN" ]; then
+        _init_xray_config
+        _create_xray_service >/dev/null 2>&1 || true
+    fi
     _xray_menu
 }
 
