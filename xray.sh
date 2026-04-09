@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.2.2"
+SCRIPT_VERSION="3.2.1"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -422,29 +422,8 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    # 为 systemd 创建服务单元，并根据计算得到的 mem_limit 设置 GOMEMLIMIT 环境变量。
-    local mem_limit
-    mem_limit=$(_get_mem_limit)
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cat > /etc/systemd/system/xray.service <<EOF2
-[Unit]
-Description=Xray Service
-After=network.target nss-lookup.target
-
-[Service]
-Type=simple
-Environment="GOMEMLIMIT=${mem_limit}"
-ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
-Restart=on-failure
-RestartSec=3s
-LimitNOFILE=65535
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-    else
-        cat > /etc/systemd/system/xray.service <<EOF2
+    # 为 systemd 创建服务单元。不设置 GOMEMLIMIT 环境变量，以保持与 xrayManager.sh 一致。
+    cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
 After=network.target nss-lookup.target
@@ -460,27 +439,18 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF2
-    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable xray >/dev/null 2>&1 || true
 }
 
 _create_xray_openrc_service() {
     touch "${XRAY_LOG}" 2>/dev/null || true
-    # 计算内存限制，如果 mem_limit 不为 0 则在启动命令中注入 GOMEMLIMIT 环境变量。
-    local mem_limit extra_env
-    mem_limit=$(_get_mem_limit)
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        extra_env="GOMEMLIMIT=${mem_limit} "
-    else
-        extra_env=""
-    fi
-
+    # 创建 openrc 服务，不设置 GOMEMLIMIT 环境变量，以保持与 xrayManager.sh 一致。
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="-c '${extra_env}exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+command_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
