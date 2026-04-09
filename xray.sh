@@ -187,6 +187,7 @@ _atomic_modify_json() {
 }
 
 
+
 _get_meminfo_total_mb() {
     local total_mem_mb=0
     total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
@@ -337,45 +338,18 @@ _get_cgroup_current_mb() {
 # 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
 # 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
 _get_mem_limit() {
-    local total_mem_mb current_mem_mb reserve_floor_mb reserve_ratio_mb pressure_reserve_mb
-    local hard_cap_mb dynamic_cap_mb limit min_limit_mb
-
-    if [[ "${XRAY_GOMEMLIMIT_MB:-}" =~ ^[0-9]+$ ]] && [ "${XRAY_GOMEMLIMIT_MB}" -gt 0 ]; then
-        echo "${XRAY_GOMEMLIMIT_MB}"
-        return 0
-    fi
-
-    total_mem_mb=$(_get_effective_total_mem_mb)
-    current_mem_mb=$(_get_cgroup_current_mb 2>/dev/null || true)
-
-    if ! [[ "$current_mem_mb" =~ ^[0-9]+$ ]] || [ "$current_mem_mb" -lt 0 ]; then
-        current_mem_mb=0
-    fi
-    [ "$current_mem_mb" -gt "$total_mem_mb" ] && current_mem_mb="$total_mem_mb"
-
-    reserve_floor_mb=48
-    reserve_ratio_mb=$((total_mem_mb / 6))
-    [ "$reserve_ratio_mb" -lt "$reserve_floor_mb" ] && reserve_ratio_mb=$reserve_floor_mb
-
-    # 当前容器占用越高，额外余量越大，避免把 cgroup 顶满。
-    pressure_reserve_mb=$((current_mem_mb / 3))
-    [ "$pressure_reserve_mb" -gt $((total_mem_mb / 3)) ] && pressure_reserve_mb=$((total_mem_mb / 3))
-
-    hard_cap_mb=$((total_mem_mb * 80 / 100))
-    dynamic_cap_mb=$((total_mem_mb - reserve_ratio_mb - pressure_reserve_mb))
-
-    if [ "$dynamic_cap_mb" -lt "$hard_cap_mb" ]; then
-        limit=$dynamic_cap_mb
-    else
-        limit=$hard_cap_mb
-    fi
-
-    min_limit_mb=40
-    [ "$limit" -gt $((total_mem_mb - 12)) ] && limit=$((total_mem_mb - 12))
-    [ "$limit" -lt "$min_limit_mb" ] && limit=$min_limit_mb
-
-    echo "$limit"
+    # Memory limit calculation disabled. Always return a default constant.
+    echo 0
 }
+
+# 再次重定义内存检测函数为空操作，以覆盖先前的实现。
+# 这些函数不再执行任何内存检测逻辑，有助于脚本轻量化。
+_get_meminfo_total_mb()    { :; }
+_is_likely_container()     { :; }
+_read_first_cgroup_value() { :; }
+_get_cgroup_limit_mb()     { :; }
+_get_effective_total_mem_mb() { :; }
+_get_cgroup_current_mb()   { :; }
 
 _check_port_occupied() {
     local port="$1"
@@ -455,7 +429,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-ExecStart=/bin/sh -c 'limit=$(${SCRIPT_INSTALL_PATH} --print-mem-limit 2>/dev/null || echo 64); exec env GOMEMLIMIT=${limit}MiB ${XRAY_BIN} run -c ${XRAY_CONFIG}'
+ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
@@ -475,7 +449,7 @@ _create_xray_openrc_service() {
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="-c 'limit=$(${SCRIPT_INSTALL_PATH} --print-mem-limit 2>/dev/null || echo 64); exec env GOMEMLIMIT=${limit}MiB ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+command_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
@@ -958,16 +932,12 @@ _xray_menu() {
 }
 
 _maybe_handle_internal_subcommand() {
-    case "${1:-}" in
-        --print-mem-limit)
-            _get_mem_limit
-            exit 0
-            ;;
-    esac
+    # Memory tuning subcommand has been removed. No internal subcommands to handle.
+    return 0
 }
 
 _main() {
-    _maybe_handle_internal_subcommand "$1"
+    # 已移除内部子命令处理逻辑，直接执行后续步骤
     _check_root
     _detect_init_system
     _ensure_deps
