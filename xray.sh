@@ -338,18 +338,27 @@ _get_cgroup_current_mb() {
 # 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
 # 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
 _get_mem_limit() {
-    # Memory limit calculation disabled. Always return a default constant.
-    echo 0
+    # 动态计算 GOMEMLIMIT（返回形如 "512MiB" 或 0 表示不设置）。
+    # 使用有效的系统/容器内存作为基准，为系统预留部分内存，并将剩余的一定比例
+    # 分配给 Go 运行时以控制峰值内存。
+    local total_mb current_mb limit_mb
+    total_mb=$(_get_effective_total_mem_mb)
+    # 若无法检测到总内存则不启用限制
+    if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
+        echo 0
+        return
+    fi
+    # 使用总内存的 70% 作为软限值，预留约 30% 给系统和其他进程
+    limit_mb=$(( total_mb * 70 / 100 ))
+    # 如果计算结果过小(<256MiB)，不启用 GOMEMLIMIT，以免频繁 GC 影响性能
+    if [ "$limit_mb" -lt 256 ]; then
+        echo 0
+    else
+        echo "${limit_mb}MiB"
+    fi
 }
 
-# 再次重定义内存检测函数为空操作，以覆盖先前的实现。
-# 这些函数不再执行任何内存检测逻辑，有助于脚本轻量化。
-_get_meminfo_total_mb()    { :; }
-_is_likely_container()     { :; }
-_read_first_cgroup_value() { :; }
-_get_cgroup_limit_mb()     { :; }
-_get_effective_total_mem_mb() { :; }
-_get_cgroup_current_mb()   { :; }
+# 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
 
 _check_port_occupied() {
     local port="$1"
@@ -422,7 +431,29 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    cat > /etc/systemd/system/xray.service <<EOF2
+    # 为 systemd 创建服务单元，并根据计算得到的 mem_limit 设置 GOMEMLIMIT 环境变量。
+    local mem_limit
+    mem_limit=$(_get_mem_limit)
+    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
+        cat > /etc/systemd/system/xray.service <<EOF2
+[Unit]
+Description=Xray Service
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+Environment="GOMEMLIMIT=${mem_limit}"
+ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+    else
+        cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
 After=network.target nss-lookup.target
@@ -438,18 +469,27 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF2
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable xray >/dev/null 2>&1 || true
 }
 
 _create_xray_openrc_service() {
     touch "${XRAY_LOG}" 2>/dev/null || true
+    # 计算内存限制，如果 mem_limit 不为 0 则在启动命令中注入 GOMEMLIMIT 环境变量。
+    local mem_limit extra_env
+    mem_limit=$(_get_mem_limit)
+    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
+        extra_env="GOMEMLIMIT=${mem_limit} "
+    else
+        extra_env=""
+    fi
 
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+command_args="-c '${extra_env}exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
