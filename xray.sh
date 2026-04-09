@@ -84,6 +84,9 @@ _ensure_deps() {
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing+=("curl")
     command -v unzip >/dev/null 2>&1 || missing+=("unzip")
     command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || _pkg_install iproute2 net-tools
+    if command -v apk >/dev/null 2>&1; then
+        [ -f /etc/ssl/certs/ca-certificates.crt ] || missing+=("ca-certificates")
+    fi
     [ ${#missing[@]} -gt 0 ] && _pkg_install "${missing[@]}"
 }
 
