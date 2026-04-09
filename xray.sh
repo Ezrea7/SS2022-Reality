@@ -4,10 +4,12 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0.1"
+SCRIPT_VERSION="3.0.2"
 SCRIPT_CMD_NAME="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh"
+SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF_SCRIPT_PATH")" 2>/dev/null && pwd)"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
@@ -593,24 +595,58 @@ _modify_xray_port() {
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
 }
 
-_uninstall_xray() {
-    echo ""
-    _warn "即将卸载 Xray 核心及其全部配置。"
-    read -p "确定要卸载吗? (输入 yes 确认): " confirm
-    [ "$confirm" = "yes" ] || { _info "卸载已取消。"; return; }
+_remove_xray_runtime() {
     _manage_xray_service stop >/dev/null 2>&1 || true
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl disable xray >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xray.service
         systemctl daemon-reload >/dev/null 2>&1 || true
     elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service xray stop >/dev/null 2>&1 || true
         rc-update del xray default >/dev/null 2>&1 || true
         rm -f /etc/init.d/xray
     fi
     rm -f "$XRAY_BIN"
     rm -rf "$XRAY_DIR"
+}
+
+_uninstall_xray() {
+    echo ""
+    _warn "即将卸载 Xray 核心及其全部配置，保留管理脚本。"
+    read -p "确定要卸载吗? (输入 yes 确认): " confirm
+    [ "$confirm" = "yes" ] || { _info "卸载已取消。"; return; }
+    _remove_xray_runtime
+    _success "Xray 已完全卸载，管理脚本仍可继续使用。"
+}
+
+_uninstall_script() {
+    _warn "！！！警告！！！"
+    _warn "本操作将停止并禁用 Xray 服务，"
+    _warn "删除所有相关文件（包括二进制、配置文件、快捷命令及脚本本体）。"
+
+    echo ""
+    echo "即将删除以下内容："
+    echo -e "  ${RED}-${NC} Xray 配置目录: ${XRAY_DIR}"
+    echo -e "  ${RED}-${NC} Xray 二进制: ${XRAY_BIN}"
+    echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_INSTALL_PATH}"
+    [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
+    echo ""
+
+    read -p "$(echo -e ${YELLOW}"确定要执行卸载吗? (y/N): "${NC})" confirm_main
+    [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && _info "卸载已取消。" && return
+
+    _info "正在停止并清理 Xray ..."
+    _remove_xray_runtime
+
+    _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH"
-    _success "Xray 已完全卸载。"
+    if [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && [ "$SELF_SCRIPT_PATH" != "$SCRIPT_INSTALL_PATH" ]; then
+        rm -f "$SELF_SCRIPT_PATH"
+    fi
+
+    _success "清理完成。脚本已自毁。再见！"
+    [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && rm -f "$SELF_SCRIPT_PATH"
+    exit 0
 }
 
 _show_status_header() {
@@ -660,7 +696,8 @@ _xray_menu() {
         echo -e "  ${GREEN}[10]${NC} 修改节点端口"
         echo -e "  ${GREEN}[11]${NC} 更新脚本"
         echo ""
-        echo -e "  ${RED}[99]${NC} 卸载 Xray"
+        echo -e "  ${RED}[88]${NC} 卸载 Xray"
+        echo -e "  ${RED}[99]${NC} 卸载脚本"
         echo -e "  ${YELLOW}[0]${NC} 退出脚本"
         echo -e "=================================================="
         read -p "请选择 [0-99]: " choice
@@ -676,7 +713,8 @@ _xray_menu() {
             9) _delete_xray_node; read -p "按回车键继续..." ;;
             10) _modify_xray_port; read -p "按回车键继续..." ;;
             11) _update_script_self; read -p "按回车键继续..." ;;
-            99) _uninstall_xray; read -p "按回车键继续..." ;;
+            88) _uninstall_xray; read -p "按回车键继续..." ;;
+            99) _uninstall_script ;;
             0) exit 0 ;;
             *) _error "无效输入。"; read -p "按回车键继续..." ;;
         esac
