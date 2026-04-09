@@ -4,9 +4,10 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="3.0.1"
 SCRIPT_CMD_NAME="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
+SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
@@ -80,6 +81,53 @@ _install_script_shortcut() {
     mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null || true
     cp -f "$src" "$SCRIPT_INSTALL_PATH" 2>/dev/null || return 0
     chmod +x "$SCRIPT_INSTALL_PATH" 2>/dev/null || true
+}
+
+_update_script_self() {
+    local tmp="/tmp/${SCRIPT_CMD_NAME}.update.$$"
+    local src
+    src="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+
+    _info "正在从仓库更新脚本..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -LfsS "$SCRIPT_UPDATE_URL" -o "$tmp" 2>/dev/null || {
+            rm -f "$tmp"
+            _error "下载更新失败。"
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$SCRIPT_UPDATE_URL" -O "$tmp" 2>/dev/null || {
+            rm -f "$tmp"
+            _error "下载更新失败。"
+            return 1
+        }
+    else
+        _error "未找到 curl/wget，无法更新脚本。"
+        return 1
+    fi
+
+    if ! bash -n "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        _error "更新文件语法校验失败，已取消覆盖。"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null || true
+    cp -f "$tmp" "$SCRIPT_INSTALL_PATH" || {
+        rm -f "$tmp"
+        _error "写入 ${SCRIPT_INSTALL_PATH} 失败。"
+        return 1
+    }
+    chmod +x "$SCRIPT_INSTALL_PATH" 2>/dev/null || true
+
+    if [ -n "$src" ] && [ -f "$src" ] && [ "$src" != "$SCRIPT_INSTALL_PATH" ]; then
+        cp -f "$tmp" "$src" 2>/dev/null || true
+        chmod +x "$src" 2>/dev/null || true
+    fi
+
+    rm -f "$tmp"
+    _success "脚本已更新。当前快捷命令: ${SCRIPT_CMD_NAME}"
+    _warn "请重新运行 ${SCRIPT_CMD_NAME} 以加载新版本。"
 }
 
 _get_public_ip() {
@@ -610,6 +658,7 @@ _xray_menu() {
         echo -e "  ${GREEN}[8]${NC} 查看所有节点"
         echo -e "  ${GREEN}[9]${NC} 删除节点"
         echo -e "  ${GREEN}[10]${NC} 修改节点端口"
+        echo -e "  ${GREEN}[11]${NC} 更新脚本"
         echo ""
         echo -e "  ${RED}[99]${NC} 卸载 Xray"
         echo -e "  ${YELLOW}[0]${NC} 退出脚本"
@@ -626,6 +675,7 @@ _xray_menu() {
             8) _view_xray_nodes; read -p "按回车键继续..." ;;
             9) _delete_xray_node; read -p "按回车键继续..." ;;
             10) _modify_xray_port; read -p "按回车键继续..." ;;
+            11) _update_script_self; read -p "按回车键继续..." ;;
             99) _uninstall_xray; read -p "按回车键继续..." ;;
             0) exit 0 ;;
             *) _error "无效输入。"; read -p "按回车键继续..." ;;
