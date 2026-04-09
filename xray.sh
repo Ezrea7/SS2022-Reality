@@ -337,25 +337,16 @@ _get_cgroup_current_mb() {
 # 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
 # 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
 # 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
+# 内存限制计算函数
+#
+# 按照其他作者的 xray_manager.sh 脚本实现，不对 Go 运行时设置
+# GOMEMLIMIT 环境变量。该函数始终返回 0，表示不启用
+# 动态内存限制。这样可以保留脚本原有功能和配置逻辑不变，
+# 仅在内存控制方面与 xray_manager.sh 保持一致。
 _get_mem_limit() {
-    # 动态计算 GOMEMLIMIT（返回形如 "512MiB" 或 0 表示不设置）。
-    # 使用有效的系统/容器内存作为基准，为系统预留部分内存，并将剩余的一定比例
-    # 分配给 Go 运行时以控制峰值内存。
-    local total_mb current_mb limit_mb
-    total_mb=$(_get_effective_total_mem_mb)
-    # 若无法检测到总内存则不启用限制
-    if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
-        echo 0
-        return
-    fi
-    # 使用总内存的 70% 作为软限值，预留约 30% 给系统和其他进程
-    limit_mb=$(( total_mb * 70 / 100 ))
-    # 如果计算结果过小(<256MiB)，不启用 GOMEMLIMIT，以免频繁 GC 影响性能
-    if [ "$limit_mb" -lt 256 ]; then
-        echo 0
-    else
-        echo "${limit_mb}MiB"
-    fi
+    # xray_manager.sh 中没有针对 GOMEMLIMIT 的内存回收机制，
+    # 因此此处直接返回 0 以禁用 GOMEMLIMIT 设置。
+    echo 0
 }
 
 # 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
