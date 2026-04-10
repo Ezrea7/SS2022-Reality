@@ -188,7 +188,6 @@ _atomic_modify_json() {
 
 
 
-
 _get_meminfo_total_mb() {
     local total_mem_mb=0
     total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
@@ -634,13 +633,6 @@ _save_xray_meta() {
         jq --arg t "$tag" --arg k "$key" --arg v "$val" '.[$t][$k] = $v' "$XRAY_METADATA" > "$tmp2" 2>/dev/null && mv "$tmp2" "$XRAY_METADATA" || rm -f "$tmp2"
     done
 }
-
-# -----------------------------------------------------------------------------
-# 下面的节点添加函数来自 xray_manager.sh，用于新增多种协议的 Xray 节点。
-# 这些函数不会修改原有脚本的添加节点逻辑 (SS2022+Reality)，但提供额外的
-# VLESS/Trojan/Shadowsocks 等协议支持。调用这些函数前，请确保
-# YQ_BINARY 可用，并根据需要编辑 Clash/Mihomo 配置文件。
-
 
 _add_ss2022_reality() {
     [ ! -f "$XRAY_BIN" ] && { _error "请先安装/更新 Xray 核心。"; return 1; }
