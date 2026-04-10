@@ -395,43 +395,12 @@ _init_xray_config() {
     mkdir -p "$XRAY_DIR"
     touch "$XRAY_LOG" 2>/dev/null || true
     if [ ! -s "$XRAY_CONFIG" ]; then
-        # 初始化配置文件时直接写入一份符合官方规范的 SS2022+Reality 配置示例。
-        # 该示例包含一个 shadowsocks 入站配置，采用 2022-blake3-aes-128-gcm 方法，
-        # 并启用 UDP 转发；流设置使用 raw 网络和 Reality 传输层。
         cat > "$XRAY_CONFIG" <<'JSON'
 {
   "log": {
     "loglevel": "warning"
   },
-  "inbounds": [
-    {
-      "tag": "xray-ss2022-reality-11411",
-      "listen": "0.0.0.0",
-      "port": 11411,
-      "protocol": "shadowsocks",
-      "settings": {
-        "method": "2022-blake3-aes-128-gcm",
-        "password": "wEp1PSK1d49dnZstjB2ZAA==",
-        "network": "tcp,udp"
-      },
-      "streamSettings": {
-        "network": "raw",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "support.apple.com:443",
-          "xver": 0,
-          "serverNames": [
-            "support.apple.com"
-          ],
-          "privateKey": "yMnJEtpjwla99H4hf5GXd31KtuHZyjNSV8Xvqw0zMVE",
-          "shortIds": [
-            "3f32505cf27046de"
-          ]
-        }
-      }
-    }
-  ],
+  "inbounds": [],
   "outbounds": [
     {
       "protocol": "freedom",
