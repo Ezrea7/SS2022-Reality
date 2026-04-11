@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.5.1"
+SCRIPT_VERSION="3.6.0"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -18,6 +18,20 @@ XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
+
+# ===== Memory & Core Selection =====
+XRAY_MEM_MODE="${XRAY_MEM_MODE:-off}"
+XRAY_GOMEMLIMIT_PERCENT="${XRAY_GOMEMLIMIT_PERCENT:-90}"
+XRAY_GOMEMLIMIT_MIN_MB="${XRAY_GOMEMLIMIT_MIN_MB:-10}"
+XRAY_RESTART_SCHEDULE="${XRAY_RESTART_SCHEDULE:-off}"
+XRAY_SYSTEMD_MEMORY_HIGH="${XRAY_SYSTEMD_MEMORY_HIGH:-}"
+XRAY_SYSTEMD_MEMORY_MAX="${XRAY_SYSTEMD_MEMORY_MAX:-}"
+XRAY_SYSTEMD_MEMORY_SWAP_MAX="${XRAY_SYSTEMD_MEMORY_SWAP_MAX:-}"
+XRAY_OOM_SCORE_ADJ="${XRAY_OOM_SCORE_ADJ:-}"
+
+XRAY_INSTALL_LOCK_DIR="/var/lock/xray-script-install.lock"
+XRAY_ENV_FILE="${XRAY_DIR}/xray.env"
+XRAY_MEM_CONF="${XRAY_DIR}/memory.conf"
 
 # IP preference configuration file used to determine whether IPv4 or IPv6 should
 # be attempted first when detecting the server's public address. Possible
@@ -376,6 +390,143 @@ _choose_ip_preference() {
 }
 
 
+_load_memory_settings() {
+    [ -f "$XRAY_MEM_CONF" ] || return 0
+    while IFS='=' read -r k v; do
+        [ -n "$k" ] || continue
+        case "$k" in
+            XRAY_MEM_MODE|XRAY_GOMEMLIMIT_PERCENT|XRAY_GOMEMLIMIT_MIN_MB|XRAY_RESTART_SCHEDULE|XRAY_SYSTEMD_MEMORY_HIGH|XRAY_SYSTEMD_MEMORY_MAX|XRAY_SYSTEMD_MEMORY_SWAP_MAX|XRAY_OOM_SCORE_ADJ)
+                eval "$k=\"${v}\""
+                ;;
+        esac
+    done < "$XRAY_MEM_CONF"
+}
+
+_save_memory_settings() {
+    mkdir -p "$XRAY_DIR" 2>/dev/null || true
+    cat > "$XRAY_MEM_CONF" <<EOF
+XRAY_MEM_MODE=${XRAY_MEM_MODE}
+XRAY_GOMEMLIMIT_PERCENT=${XRAY_GOMEMLIMIT_PERCENT}
+XRAY_GOMEMLIMIT_MIN_MB=${XRAY_GOMEMLIMIT_MIN_MB}
+XRAY_RESTART_SCHEDULE=${XRAY_RESTART_SCHEDULE}
+XRAY_SYSTEMD_MEMORY_HIGH=${XRAY_SYSTEMD_MEMORY_HIGH}
+XRAY_SYSTEMD_MEMORY_MAX=${XRAY_SYSTEMD_MEMORY_MAX}
+XRAY_SYSTEMD_MEMORY_SWAP_MAX=${XRAY_SYSTEMD_MEMORY_SWAP_MAX}
+XRAY_OOM_SCORE_ADJ=${XRAY_OOM_SCORE_ADJ}
+EOF
+}
+
+_http_get() {
+    local url="$1" out="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 300 -o "$out" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --tries=3 --timeout=30 -O "$out" "$url"
+    else
+        _error "缺少 curl/wget，无法下载。"
+        return 1
+    fi
+}
+
+_sha256_file() {
+    local f="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | awk '{print $1}'
+    else
+        openssl dgst -sha256 "$f" | awk '{print $NF}'
+    fi
+}
+
+_install_lock_acquire() {
+    mkdir -p "$(dirname "$XRAY_INSTALL_LOCK_DIR")" 2>/dev/null || true
+    if mkdir "$XRAY_INSTALL_LOCK_DIR" 2>/dev/null; then
+        echo "$$" > "${XRAY_INSTALL_LOCK_DIR}/pid" 2>/dev/null || true
+        trap '_install_lock_release; rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
+        return 0
+    fi
+    _error "检测到已有安装/更新任务在执行，请稍后再试。"
+    return 1
+}
+
+_install_lock_release() {
+    rm -rf "$XRAY_INSTALL_LOCK_DIR" 2>/dev/null || true
+}
+
+_xray_detect_asset_suffix_linux() {
+    local arch
+    arch="$(uname -m 2>/dev/null || echo unknown)"
+    case "$arch" in
+        x86_64|amd64) echo "64" ;;
+        i386|i686) echo "32" ;;
+        aarch64|arm64) echo "arm64-v8a" ;;
+        armv7l|armv7) echo "arm32-v7a" ;;
+        armv6l) echo "arm32-v6" ;;
+        armv5*|armv5tel|armv5tejl) echo "arm32-v5" ;;
+        loong64) echo "loong64" ;;
+        riscv64) echo "riscv64" ;;
+        s390x) echo "s390x" ;;
+        mips) echo "mips32" ;;
+        mipsel|mipsle) echo "mips32le" ;;
+        mips64) echo "mips64" ;;
+        mips64el|mips64le) echo "mips64le" ;;
+        ppc64) echo "ppc64" ;;
+        ppc64le) echo "ppc64le" ;;
+        *)
+            _error "不支持的架构: ${arch}"
+            return 1
+            ;;
+    esac
+}
+
+_xray_verify_zip_with_dgst() {
+    local zip="$1" dgst="$2" expect got
+    expect="$(grep -iE '^SHA256=' "$dgst" 2>/dev/null | head -n1 | awk -F'= *' '{print $2}' | tr -d '[:space:]')"
+    [ -n "$expect" ] || expect="$(grep -i 'sha256' "$dgst" 2>/dev/null | grep -Eo '[A-Fa-f0-9]{64}' | head -n1)"
+    [ -n "$expect" ] || { _error "无法从 dgst 文件解析 SHA256。"; return 1; }
+    got="$(_sha256_file "$zip" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$got" ] || { _error "无法计算安装包 SHA256。"; return 1; }
+    [ "$got" = "$expect" ] || { _error "SHA256 校验失败。"; return 1; }
+    return 0
+}
+
+_xray_download_verify_install_linux() {
+    local suffix zip_name dgst_name base tmp_dir zip_path dgst_path version backup_bin ts
+    suffix="$(_xray_detect_asset_suffix_linux)" || return 1
+    zip_name="Xray-linux-${suffix}.zip"
+    dgst_name="${zip_name}.dgst"
+    base="https://github.com/XTLS/Xray-core/releases/latest/download"
+    tmp_dir="$(mktemp -d -p /var/tmp xray.XXXXXX 2>/dev/null || mktemp -d)"
+    zip_path="${tmp_dir}/${zip_name}"
+    dgst_path="${tmp_dir}/${dgst_name}"
+
+    _info "目标内核架构包: ${zip_name}"
+    _http_get "${base}/${zip_name}" "$zip_path" || { rm -rf "$tmp_dir"; return 1; }
+    _http_get "${base}/${dgst_name}" "$dgst_path" || { rm -rf "$tmp_dir"; return 1; }
+
+    _info "正在校验 Xray 安装包 SHA256..."
+    _xray_verify_zip_with_dgst "$zip_path" "$dgst_path" || { rm -rf "$tmp_dir"; return 1; }
+
+    if [ -f "$XRAY_BIN" ]; then
+        ts="$(date +%Y%m%d%H%M%S)"
+        backup_bin="${XRAY_BIN}.bak.${ts}"
+        cp -f "$XRAY_BIN" "$backup_bin" 2>/dev/null || true
+        _info "已备份旧内核: ${backup_bin}"
+    fi
+
+    command -v unzip >/dev/null 2>&1 || _pkg_install unzip
+    (cd "$tmp_dir" && unzip -qo "$zip_name") || { _error "Xray 解压失败。"; rm -rf "$tmp_dir"; return 1; }
+    [ -f "${tmp_dir}/xray" ] || { _error "压缩包内未找到 xray 可执行文件。"; rm -rf "$tmp_dir"; return 1; }
+
+    install -m 0755 "${tmp_dir}/xray" "$XRAY_BIN" || { _error "安装 Xray 可执行文件失败。"; rm -rf "$tmp_dir"; return 1; }
+    mkdir -p "$XRAY_DIR"
+    [ -f "${tmp_dir}/geoip.dat" ] && install -m 0644 "${tmp_dir}/geoip.dat" "$XRAY_DIR/geoip.dat" || true
+    [ -f "${tmp_dir}/geosite.dat" ] && install -m 0644 "${tmp_dir}/geosite.dat" "$XRAY_DIR/geosite.dat" || true
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+
+
 
 
 _get_meminfo_total_mb() {
@@ -522,22 +673,46 @@ _get_cgroup_current_mb() {
     return 1
 }
 
-# 智能 GOMEMLIMIT 计算：
-# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
-# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
-# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
-# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
-# 内存限制计算函数
-#
-# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
-# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
-# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
 _get_mem_limit() {
-    echo 0
-    return 0
+    case "$XRAY_MEM_MODE" in
+        off|"")
+            echo 0
+            return 0
+            ;;
+        singbox-compat)
+            local total_mb limit_mb
+            total_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
+            if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
+                echo 0
+                return 0
+            fi
+            limit_mb=$(( total_mb * XRAY_GOMEMLIMIT_PERCENT / 100 ))
+            [ "$limit_mb" -lt "$XRAY_GOMEMLIMIT_MIN_MB" ] && limit_mb="$XRAY_GOMEMLIMIT_MIN_MB"
+            echo "${limit_mb}MiB"
+            return 0
+            ;;
+        auto-safe)
+            local total_mb reserve_mb budget_mb
+            total_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
+            if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
+                echo 0
+                return 0
+            fi
+            reserve_mb=$(( total_mb / 5 ))
+            [ "$reserve_mb" -lt 64 ] && reserve_mb=64
+            budget_mb=$(( total_mb - reserve_mb ))
+            [ "$budget_mb" -lt "$XRAY_GOMEMLIMIT_MIN_MB" ] && budget_mb="$XRAY_GOMEMLIMIT_MIN_MB"
+            echo "${budget_mb}MiB"
+            return 0
+            ;;
+        *)
+            _warn "未知 XRAY_MEM_MODE=${XRAY_MEM_MODE}，已回退为 off。"
+            echo 0
+            return 0
+            ;;
+    esac
 }
 
-# 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
 
 _check_port_occupied() {
     local port="$1"
@@ -610,15 +785,26 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
-    local mem_limit env_line
-    mem_limit=$(_get_mem_limit)
+    local mem_limit env_line oom_line mem_high_line mem_max_line mem_swap_line env_file_line
+    mem_limit="$(_get_mem_limit)"
     env_line=""
-    # 如果 mem_limit 非 0，则设置 Environment 指令
+    env_file_line=""
+    oom_line=""
+    mem_high_line=""
+    mem_max_line=""
+    mem_swap_line=""
+
+    mkdir -p "$XRAY_DIR" 2>/dev/null || true
+    : > "$XRAY_ENV_FILE"
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        env_line="Environment=\"GOMEMLIMIT=${mem_limit}\""
+        echo "GOMEMLIMIT=${mem_limit}" > "$XRAY_ENV_FILE"
+        env_file_line="EnvironmentFile=-${XRAY_ENV_FILE}"
     fi
-    # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
+    [ -n "$XRAY_OOM_SCORE_ADJ" ] && oom_line="OOMScoreAdjust=${XRAY_OOM_SCORE_ADJ}"
+    [ -n "$XRAY_SYSTEMD_MEMORY_HIGH" ] && mem_high_line="MemoryHigh=${XRAY_SYSTEMD_MEMORY_HIGH}"
+    [ -n "$XRAY_SYSTEMD_MEMORY_MAX" ] && mem_max_line="MemoryMax=${XRAY_SYSTEMD_MEMORY_MAX}"
+    [ -n "$XRAY_SYSTEMD_MEMORY_SWAP_MAX" ] && mem_swap_line="MemorySwapMax=${XRAY_SYSTEMD_MEMORY_SWAP_MAX}"
+
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -626,12 +812,17 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
+${env_file_line}
 ${env_line}
 ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
 NoNewPrivileges=true
+${oom_line}
+${mem_high_line}
+${mem_max_line}
+${mem_swap_line}
 
 [Install]
 WantedBy=multi-user.target
@@ -641,26 +832,21 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
-    # 避免日志文件持续增长导致的额外内存和 IO 占用。根据当前环境计算
-    # GOMEMLIMIT，并在启动命令中导出该变量。
-    local mem_limit cmd_args
-    mem_limit=$(_get_mem_limit)
+    local mem_limit cmd_prefix
+    mem_limit="$(_get_mem_limit)"
+    cmd_prefix=""
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-    else
-        cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+        cmd_prefix="export GOMEMLIMIT=${mem_limit}; "
     fi
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="${cmd_args}"
+command_args="-c '${cmd_prefix}exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
-# 不保存运行日志，保持最小 IO 占用。如果需要查看日志，可使用 systemd/journal 或在配置中调整 loglevel。
 output_log="/dev/null"
 error_log="/dev/null"
 
@@ -672,6 +858,180 @@ EOF2
     chmod +x /etc/init.d/xray
     rc-update add xray default >/dev/null 2>&1 || true
 }
+
+_xray_restart_timer_install_systemd() {
+    local time_str="$1"
+    cat > /etc/systemd/system/xray-restart.service <<EOF
+[Unit]
+Description=Xray Scheduled Restart
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart xray
+EOF
+
+    cat > /etc/systemd/system/xray-restart.timer <<EOF
+[Unit]
+Description=Xray Scheduled Restart Timer
+[Timer]
+OnCalendar=*-*-* ${time_str}:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now xray-restart.timer >/dev/null 2>&1 || return 1
+    return 0
+}
+
+_xray_restart_timer_install_openrc() {
+    local time_str="$1"
+    cat > /usr/local/bin/xray-timer.sh <<'EOF'
+#!/bin/sh
+TARGET_TIME="$1"
+while true; do
+    if [ "$(date +%H:%M)" = "$TARGET_TIME" ]; then
+        rc-service xray restart >/dev/null 2>&1 || true
+        sleep 61
+    fi
+    sleep 30
+done
+EOF
+    chmod +x /usr/local/bin/xray-timer.sh
+
+    cat > /etc/init.d/xray-timer <<EOF
+#!/sbin/openrc-run
+description="Xray Scheduled Restart Timer"
+command="/usr/local/bin/xray-timer.sh"
+command_args="${time_str}"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=0
+pidfile="/run/xray-timer.pid"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x /etc/init.d/xray-timer
+    rc-update add xray-timer default >/dev/null 2>&1 || true
+    rc-service xray-timer start >/dev/null 2>&1 || true
+}
+
+_xray_restart_timer_remove() {
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable --now xray-restart.timer >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/xray-restart.timer /etc/systemd/system/xray-restart.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service xray-timer stop >/dev/null 2>&1 || true
+        rc-update del xray-timer default >/dev/null 2>&1 || true
+        rm -f /etc/init.d/xray-timer /usr/local/bin/xray-timer.sh
+    fi
+}
+
+_xray_restart_timer_apply_from_var() {
+    local t="$XRAY_RESTART_SCHEDULE"
+    if [ -z "$t" ] || [ "$t" = "off" ]; then
+        _xray_restart_timer_remove
+        return 0
+    fi
+    if ! echo "$t" | grep -Eq '^[0-2][0-9]:[0-5][0-9]$'; then
+        _error "XRAY_RESTART_SCHEDULE 格式错误，应为 HH:MM 或 off。"
+        return 1
+    fi
+    _xray_restart_timer_remove
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        _xray_restart_timer_install_systemd "$t" || return 1
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        _xray_restart_timer_install_openrc "$t" || return 1
+    else
+        _warn "当前 init 系统不支持自动创建定时重启任务。"
+    fi
+}
+
+_show_memory_runtime_status() {
+    local mem_limit effective_mb current_mb
+    mem_limit="$(_get_mem_limit)"
+    effective_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
+    current_mb="$(_get_cgroup_current_mb 2>/dev/null || echo unknown)"
+    echo ""
+    echo -e "${YELLOW}══════════ 当前内存治理状态 ══════════${NC}"
+    echo " 模式: ${XRAY_MEM_MODE}"
+    echo " 有效总内存: ${effective_mb}MB"
+    echo " 当前占用估算: ${current_mb}MB"
+    echo " GOMEMLIMIT: ${mem_limit}"
+    echo " 定时重启: ${XRAY_RESTART_SCHEDULE}"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        [ -n "$XRAY_SYSTEMD_MEMORY_HIGH" ] && echo " MemoryHigh: ${XRAY_SYSTEMD_MEMORY_HIGH}"
+        [ -n "$XRAY_SYSTEMD_MEMORY_MAX" ] && echo " MemoryMax: ${XRAY_SYSTEMD_MEMORY_MAX}"
+        [ -n "$XRAY_SYSTEMD_MEMORY_SWAP_MAX" ] && echo " MemorySwapMax: ${XRAY_SYSTEMD_MEMORY_SWAP_MAX}"
+        [ -n "$XRAY_OOM_SCORE_ADJ" ] && echo " OOMScoreAdjust: ${XRAY_OOM_SCORE_ADJ}"
+    fi
+}
+
+_configure_memory_governance() {
+    local choice v
+    while true; do
+        clear
+        _show_memory_runtime_status
+        echo ""
+        _menu_item 1 "关闭 GOMEMLIMIT（off）"
+        _menu_item 2 "启用 singbox 兼容模式（90%）"
+        _menu_item 3 "启用 auto-safe 模式（更保守）"
+        _menu_item 4 "设置定时重启时间（HH:MM / off）"
+        _menu_item 5 "设置 systemd MemoryHigh"
+        _menu_item 6 "设置 systemd MemoryMax"
+        _menu_item 7 "设置 systemd MemorySwapMax"
+        _menu_item 8 "设置 OOMScoreAdjust"
+        _menu_exit 0 "返回"
+        echo ""
+        read -p "请选择 [0-8]: " choice
+        case "$choice" in
+            1) XRAY_MEM_MODE="off" ;;
+            2) XRAY_MEM_MODE="singbox-compat" ;;
+            3) XRAY_MEM_MODE="auto-safe" ;;
+            4)
+                read -p "请输入每天重启时间（HH:MM，输入 off 关闭）: " v
+                [ -z "$v" ] || XRAY_RESTART_SCHEDULE="$v"
+                ;;
+            5)
+                read -p "请输入 MemoryHigh（如 70% / 512M，留空清除）: " v
+                XRAY_SYSTEMD_MEMORY_HIGH="$v"
+                ;;
+            6)
+                read -p "请输入 MemoryMax（如 80% / 600M，留空清除）: " v
+                XRAY_SYSTEMD_MEMORY_MAX="$v"
+                ;;
+            7)
+                read -p "请输入 MemorySwapMax（如 0 / 1G，留空清除）: " v
+                XRAY_SYSTEMD_MEMORY_SWAP_MAX="$v"
+                ;;
+            8)
+                read -p "请输入 OOMScoreAdjust（-1000..1000，留空清除）: " v
+                XRAY_OOM_SCORE_ADJ="$v"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                _error "无效输入。"
+                _pause
+                continue
+                ;;
+        esac
+        _save_memory_settings
+        if [ -f "$XRAY_BIN" ]; then
+            _create_xray_service >/dev/null 2>&1 || true
+            _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
+            _manage_xray_service restart >/dev/null 2>&1 || true
+        fi
+        _success "内存治理配置已保存并应用。"
+        _pause
+    done
+}
+
 
 _create_xray_service() {
     case "$INIT_SYSTEM" in
@@ -726,6 +1086,9 @@ _install_or_update_xray() {
     local is_first_install=false
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
 
+    _install_lock_acquire || return 1
+    _load_memory_settings
+
     if [ "$is_first_install" = true ]; then
         _info "Xray 核心未安装，正在执行首次安装..."
     else
@@ -734,54 +1097,33 @@ _install_or_update_xray() {
         _info "当前 Xray 版本: v${current_ver}，正在检查更新..."
     fi
 
-    command -v unzip >/dev/null 2>&1 || _pkg_install unzip
-
-    local arch=$(uname -m)
-    local xray_arch="64"
-    case "$arch" in
-        x86_64|amd64)  xray_arch="64" ;;
-        aarch64|arm64) xray_arch="arm64-v8a" ;;
-        armv7l)        xray_arch="arm32-v7a" ;;
-    esac
-
-    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    local tmp_zip="${tmp_dir}/xray.zip"
-
-    _info "下载地址: ${download_url}"
-    if command -v curl >/dev/null 2>&1; then
-        curl -LfsS "$download_url" -o "$tmp_zip" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; return 1; }
-    else
-        wget -qO "$tmp_zip" "$download_url" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; return 1; }
+    if ! _xray_download_verify_install_linux; then
+        _install_lock_release
+        _error "Xray-core 安装/更新失败。"
+        return 1
     fi
-
-    unzip -qo "$tmp_zip" -d "$tmp_dir" || { _error "Xray 解压失败。"; rm -rf "$tmp_dir"; return 1; }
-
-    mv "${tmp_dir}/xray" "$XRAY_BIN"
-    chmod +x "$XRAY_BIN"
-    mkdir -p "$XRAY_DIR"
-    [ -f "${tmp_dir}/geoip.dat" ] && mv "${tmp_dir}/geoip.dat" "$XRAY_DIR/"
-    [ -f "${tmp_dir}/geosite.dat" ] && mv "${tmp_dir}/geosite.dat" "$XRAY_DIR/"
-    rm -rf "$tmp_dir"
 
     local version
     version=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
     _success "Xray-core v${version} 安装/更新成功。"
 
+    _init_xray_config
+
     if [ "$is_first_install" = true ]; then
-        _info "首次安装 Xray，正在初始化配置与服务..."
-        _init_xray_config
-        # Default to IPv4 priority on first installation; ignore errors.
         _set_ip_preference ipv4 >/dev/null 2>&1 || true
-        _create_xray_service
+    fi
+
+    _create_xray_service
+    _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
+
+    if [ "$is_first_install" = true ]; then
         _manage_xray_service start
         _success "Xray 首次安装完成并已启动。"
     else
-        _init_xray_config
-        _create_xray_service
         _manage_xray_service restart
     fi
+
+    _install_lock_release
 }
 
 _view_xray_log() {
@@ -1022,6 +1364,8 @@ _remove_xray_runtime() {
         rc-update del xray default >/dev/null 2>&1 || true
         rm -f /etc/init.d/xray
     fi
+    _xray_restart_timer_remove >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/xray-restart.service /etc/systemd/system/xray-restart.timer
     rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
 }
@@ -1113,7 +1457,7 @@ _xray_menu() {
         _menu_item 10 "修改节点端口"
         _menu_item 11 "更新脚本"
         _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
-        # 已移除 BBR 优化功能
+        _menu_item 13 "内核内存治理 / 定时重启"
         echo ""
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
@@ -1133,6 +1477,7 @@ _xray_menu() {
             10) _modify_xray_port; _pause ;;
             11) _update_script_self; _pause; exit 0 ;;
             12) _choose_ip_preference ;;
+            13) _configure_memory_governance ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
@@ -1151,10 +1496,12 @@ _main() {
     _check_root
     _detect_init_system
     _ensure_deps
+    _load_memory_settings
     _install_script_shortcut
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
+        _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
     fi
     _xray_menu
 }
