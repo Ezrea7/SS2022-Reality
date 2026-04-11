@@ -171,23 +171,45 @@ _get_public_ip() {
     local ip="" pref
     pref=$(_get_ip_preference)
     # Attempt detection with curl if available, following user preference first.
+    # Use built-in timeout options instead of separate `timeout` command for broader compatibility.
+    # Try multiple services: icanhazip.com, ipinfo.io/ip, and api.ipify.org (or api6.ipify.org for IPv6).
     if command -v curl >/dev/null 2>&1; then
         if [ "$pref" = "ipv6" ]; then
-            ip=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null)
-            [ -z "$ip" ] && ip=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null)
+            # Prefer IPv6 first; use api6.ipify.org for IPv6 fallback
+            ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
+                 || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
+                 || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
+            # If IPv6 detection failed, fall back to IPv4 detection
+            [ -z "$ip" ] && ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
+                                  || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
+                                  || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
         else
-            ip=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null)
-            [ -z "$ip" ] && ip=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null)
+            # Prefer IPv4 first; use api.ipify.org for IPv4 fallback
+            ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
+                 || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
+                 || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
+            # If IPv4 detection failed, fall back to IPv6 detection
+            [ -z "$ip" ] && ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
+                                  || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
+                                  || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
         fi
     fi
     # Fallback to wget if curl didn't yield a result
     if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
         if [ "$pref" = "ipv6" ]; then
-            ip=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null)
-            [ -z "$ip" ] && ip=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null)
+            ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
+                 || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                 || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
+            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
+                                  || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                                  || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
         else
-            ip=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null)
-            [ -z "$ip" ] && ip=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null)
+            ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
+                 || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                 || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
+            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
+                                  || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                                  || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
         fi
     fi
     server_ip="$ip"
@@ -255,18 +277,26 @@ _choose_ip_preference() {
     local ip4="" ip6=""
     # Attempt detection using curl
     if command -v curl >/dev/null 2>&1; then
-        # IPv4
-        ip4=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null || true)
-        # IPv6
-        ip6=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null || true)
+        # IPv4: try multiple services, fall back to api.ipify.org
+        ip4=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
+               || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
+               || curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
+        # IPv6: try multiple services, fall back to api6.ipify.org
+        ip6=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
+               || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
+               || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null || true)
     fi
     # Attempt detection using wget if either is missing
     if command -v wget >/dev/null 2>&1; then
         if [ -z "$ip4" ]; then
-            ip4=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null || true)
+            ip4=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
+                   || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                   || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null || true)
         fi
         if [ -z "$ip6" ]; then
-            ip6=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null || true)
+            ip6=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
+                   || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
+                   || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null || true)
         fi
     fi
     echo ""
