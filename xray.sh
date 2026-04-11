@@ -377,6 +377,7 @@ _choose_ip_preference() {
 
 
 
+
 _get_meminfo_total_mb() {
     local total_mem_mb=0
     total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
@@ -528,30 +529,12 @@ _get_cgroup_current_mb() {
 # 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
 # 内存限制计算函数
 #
-# 按照其他作者的 xray_manager.sh 脚本实现，不对 Go 运行时设置
-# GOMEMLIMIT 环境变量。该函数始终返回 0，表示不启用
-# 动态内存限制。这样可以保留脚本原有功能和配置逻辑不变，
-# 仅在内存控制方面与 xray_manager.sh 保持一致。
+# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
+# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
+# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
 _get_mem_limit() {
-    # 根据当前可用内存计算 Go 运行时的软内存限制（GOMEMLIMIT）。
-    # 优先使用 cgroup 的 memory limit，如果未设置则使用 /proc/meminfo 中的总内存。
-    # 预留 20% 内存给系统和其他进程，将 80% 的内存分配给 Go 运行时。
-    # 返回值支持 Go 解析的单位，例如 "512MiB"；如果计算值过小，则返回 0 表示不设置。
-    local total_mb limit_mb
-    total_mb=$(_get_effective_total_mem_mb)
-    # 若 total_mb 非数字或小于等于 0，则不设置限制
-    if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
-        echo 0
-        return 0
-    fi
-    # 计算 80% 的可用内存作为限制
-    limit_mb=$(( total_mb * 80 / 100 ))
-    # 若限制小于 128MiB，则不设置 GOMEMLIMIT
-    if [ "$limit_mb" -lt 128 ]; then
-        echo 0
-        return 0
-    fi
-    echo "${limit_mb}MiB"
+    echo 0
+    return 0
 }
 
 # 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
@@ -1130,6 +1113,7 @@ _xray_menu() {
         _menu_item 10 "修改节点端口"
         _menu_item 11 "更新脚本"
         _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
+        # 已移除 BBR 优化功能
         echo ""
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
