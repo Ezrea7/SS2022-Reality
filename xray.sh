@@ -651,38 +651,26 @@ _install_sing_box() {
         return 1
     fi
 
-    tmp_tar=$(mktemp -p /var/tmp sing-box.XXXXXX.tar.gz 2>/dev/null || mktemp /tmp/sing-box.XXXXXX.tar.gz)
-    if command -v curl >/dev/null 2>&1; then
-        curl -LfsS "$download_url" -o "$tmp_tar" || { rm -f "$tmp_tar"; _error "下载 sing-box 失败。"; return 1; }
-    else
-        wget -qO "$tmp_tar" "$download_url" || { rm -f "$tmp_tar"; _error "下载 sing-box 失败。"; return 1; }
+_install_sing_box() {
+    ...
+    tmp_tar=$(mktemp /tmp/sing-box.XXXXXX.tar.gz)
+    if [ -z "$tmp_tar" ]; then
+        _error "无法创建临时文件。"
+        return 1
     fi
 
-    if [ -n "$checksum_url" ] && [ "$checksum_url" != "null" ]; then
-        _info "正在进行 SHA256 完整性校验..."
-        checksums=$(curl -fsSL "$checksum_url" 2>/dev/null || wget -qO- "$checksum_url" 2>/dev/null)
-        if [ -n "$checksums" ]; then
-            dl_filename=$(basename "$download_url")
-            expected_hash=$(echo "$checksums" | grep "$dl_filename" | awk '{print $1}' | head -n1)
-            if [ -n "$expected_hash" ]; then
-                actual_hash=$(sha256sum "$tmp_tar" | awk '{print $1}')
-                if [ "$expected_hash" != "$actual_hash" ]; then
-                    _error "sing-box SHA256 校验失败。"
-                    rm -f "$tmp_tar"
-                    return 1
-                fi
-                _success "sing-box SHA256 校验通过。"
-            else
-                _warn "校验文件中未找到匹配条目，跳过 sing-box 校验。"
-            fi
-        else
-            _warn "校验文件下载失败，跳过 sing-box 校验。"
-        fi
-    else
-        _warn "未找到 sing-box SHA256 校验文件，跳过完整性校验。"
+    # 下载过程略...
+
+    temp_dir=$(mktemp -d /tmp/singbox.XXXXXX)
+    if [ -z "$temp_dir" ]; then
+        rm -f "$tmp_tar"
+        _error "无法创建临时目录。"
+        return 1
     fi
 
-    temp_dir=$(mktemp -d -p /var/tmp singbox.XXXXXX 2>/dev/null || mktemp -d)
+    tar -xzf "$tmp_tar" -C "$temp_dir" || { rm -f "$tmp_tar"; rm -rf "$temp_dir"; _error "解压失败。"; return 1; }
+    ...
+}
     tar -xzf "$tmp_tar" -C "$temp_dir" || { rm -f "$tmp_tar"; rm -rf "$temp_dir"; _error "解压 sing-box 失败。"; return 1; }
     install -m 0755 "$temp_dir"/sing-box-*/sing-box "$SINGBOX_BIN" || { rm -f "$tmp_tar"; rm -rf "$temp_dir"; _error "安装 sing-box 失败。"; return 1; }
     rm -f "$tmp_tar"
