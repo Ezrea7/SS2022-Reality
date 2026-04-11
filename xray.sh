@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.5.1"
+SCRIPT_VERSION="3.5"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -523,17 +523,40 @@ _get_cgroup_current_mb() {
 }
 
 # 智能 GOMEMLIMIT 计算：
-# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
-# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
-# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
-# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
-# 内存限制计算函数
+# 该函数根据有效总内存动态计算 GOMEMLIMIT 的值，通过限制 Go 运行时
+# 的内存上限，让垃圾回收在内存占用达到一定百分比时立即回收堆内存。
 #
-# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
-# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
-# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
+# 工作原理：
+#   1) 使用 `_get_effective_total_mem_mb` 获取实际可用总内存，以免在
+#      LXC 容器中误判宿主机的内存大小【542660905943230†L234-L263】。
+#   2) 如果无法获取有效数值或者总内存小于 128MB，则返回 0，不设置
+#      GOMEMLIMIT，此时交由 Go 自己决定。
+#   3) 计算 GOMEMLIMIT = 有效总内存 × 78%，以保证在总内存占用
+#      接近 ~80% 时触发垃圾回收。例如在 128MB 的 lxc 容器中，大约
+#      100MB 就会触发内存释放。
+#   4) 结果小于 64MB 时同样返回 0，避免设置过低导致频繁 GC。
+#
 _get_mem_limit() {
-    echo 0
+    # 若用户已显式设置 GOMEMLIMIT，则不覆盖
+    if [ -n "${GOMEMLIMIT}" ]; then
+        echo 0
+        return 0
+    fi
+    local total_mb limit_mb
+    total_mb=$(_get_effective_total_mem_mb)
+    # 要求有效总内存并确保不少于 128MB
+    if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -lt 128 ]; then
+        echo 0
+        return 0
+    fi
+    # 计算 78% 的总内存作为限制
+    limit_mb=$(( total_mb * 78 / 100 ))
+    # 避免过低
+    if [ "$limit_mb" -lt 64 ]; then
+        echo 0
+        return 0
+    fi
+    echo "${limit_mb}MiB"
     return 0
 }
 
