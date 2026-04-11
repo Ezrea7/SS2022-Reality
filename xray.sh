@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.6.2"
+SCRIPT_VERSION="3.6.1"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -26,7 +26,6 @@ SINGBOX_RELAY_CONFIG="${SINGBOX_DIR}/relay.json"
 SINGBOX_LOG="/var/log/sing-box.log"
 SINGBOX_PID_FILE="/tmp/sing-box.pid"
 SINGBOX_SERVICE_NAME="sing-box"
-SINGBOX_RESTART_CONF="${SINGBOX_DIR}/restart_schedule.conf"
 ENABLE_DEPRECATED_LEGACY_DNS_SERVERS="true"
 ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM="true"
 ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER="true"
@@ -795,149 +794,14 @@ _install_or_update_singbox() {
     fi
     _install_sing_box || { _release_install_lock; return 1; }
     _initialize_singbox_runtime_files
-    _load_singbox_restart_schedule
     _create_singbox_service
     _manage_singbox_service restart >/dev/null 2>&1 || _manage_singbox_service start >/dev/null 2>&1 || true
-    _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
     _release_install_lock
     _success "sing-box 安装/更新成功。"
 }
 
-_xray_restart_timer_install_systemd() {
-    local time_str="$1"
-    cat > /etc/systemd/system/xray-restart.service <<EOF
-[Unit]
-Description=Sing-box Scheduled Restart
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/systemctl restart ${SINGBOX_SERVICE_NAME}
-EOF
-
-    cat > /etc/systemd/system/xray-restart.timer <<EOF
-[Unit]
-Description=Sing-box Scheduled Restart Timer
-[Timer]
-OnCalendar=*-*-* ${time_str}:00
-Persistent=true
-[Install]
-WantedBy=timers.target
-EOF
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now xray-restart.timer >/dev/null 2>&1 || return 1
-    return 0
-}
-
-_xray_restart_timer_install_openrc() {
-    local time_str="$1"
-    cat > /usr/local/bin/xray-timer.sh <<'EOF'
-#!/bin/sh
-TARGET_TIME="$1"
-while true; do
-  if [ "$(date +%H:%M)" = "$TARGET_TIME" ]; then
-    rc-service sing-box restart >/dev/null 2>&1 || true
-    sleep 61
-  fi
-  sleep 30
-done
-EOF
-    chmod +x /usr/local/bin/xray-timer.sh
-    cat > /etc/init.d/xray-timer <<EOF
-#!/sbin/openrc-run
-description="Sing-box Scheduled Restart Timer"
-command="/usr/local/bin/xray-timer.sh"
-command_args="${time_str}"
-supervisor="supervise-daemon"
-respawn_delay=3
-respawn_max=0
-pidfile="/run/xray-timer.pid"
-depend() { need net; after firewall; }
-EOF
-    chmod +x /etc/init.d/xray-timer
-    rc-update add xray-timer default >/dev/null 2>&1 || true
-    rc-service xray-timer start >/dev/null 2>&1 || true
-}
-
-_xray_restart_timer_remove() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable --now xray-restart.timer >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/xray-restart.timer /etc/systemd/system/xray-restart.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-service xray-timer stop >/dev/null 2>&1 || true
-        rc-update del xray-timer default >/dev/null 2>&1 || true
-        rm -f /etc/init.d/xray-timer /usr/local/bin/xray-timer.sh
-    fi
-}
-
-_load_singbox_restart_schedule() {
-    if [ -s "$SINGBOX_RESTART_CONF" ]; then
-        XRAY_RESTART_SCHEDULE=$(tr -d '[:space:]' < "$SINGBOX_RESTART_CONF")
-    else
-        XRAY_RESTART_SCHEDULE="off"
-    fi
-}
-
-_save_singbox_restart_schedule() {
-    mkdir -p "$SINGBOX_DIR"
-    echo "${XRAY_RESTART_SCHEDULE:-off}" > "$SINGBOX_RESTART_CONF"
-}
-
-_xray_restart_timer_apply_from_var() {
-    local t="${XRAY_RESTART_SCHEDULE:-off}"
-    if [ -z "$t" ] || [ "$t" = "off" ]; then
-        _xray_restart_timer_remove
-        _save_singbox_restart_schedule
-        return 0
-    fi
-    echo "$t" | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || { _error "XRAY_RESTART_SCHEDULE 格式错误，应为 HH:MM 或 off"; return 1; }
-    _xray_restart_timer_remove
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        _xray_restart_timer_install_systemd "$t" || return 1
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        _xray_restart_timer_install_openrc "$t" || return 1
-    else
-        _warn "unknown init：不自动创建定时任务。"
-        return 1
-    fi
-    _save_singbox_restart_schedule
-    _success "已启用 sing-box 定时重启：每天 ${t}"
-}
-
-_configure_singbox_memory_reclaim() {
-    while true; do
-        clear
-        echo ""
-        echo -e "=================================================="
-        echo -e " Sing-box 内存回收设置"
-        echo -e "=================================================="
-        echo " 当前 GOMEMLIMIT 算法: total_mem * 90% (最小 10MiB)"
-        echo " 当前定时重启: ${XRAY_RESTART_SCHEDULE:-off}"
-        echo ""
-        _menu_item 1 "设置每天定时重启 sing-box"
-        _menu_item 2 "关闭定时重启 sing-box"
-        _menu_exit 0 "返回上级菜单"
-        read -p "请选择 [0-2]: " sub
-        case "$sub" in
-            1)
-                read -p "请输入每天重启时间 (HH:MM): " t
-                XRAY_RESTART_SCHEDULE="$t"
-                _xray_restart_timer_apply_from_var
-                _pause
-                ;;
-            2)
-                XRAY_RESTART_SCHEDULE=off
-                _xray_restart_timer_apply_from_var
-                _pause
-                ;;
-            0) return 0 ;;
-            *) _error "无效输入。"; _pause ;;
-        esac
-    done
-}
-
 _remove_singbox_runtime() {
     _manage_singbox_service stop >/dev/null 2>&1 || true
-    _xray_restart_timer_remove >/dev/null 2>&1 || true
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl disable ${SINGBOX_SERVICE_NAME} >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/${SINGBOX_SERVICE_NAME}.service
@@ -947,7 +811,7 @@ _remove_singbox_runtime() {
         rc-update del ${SINGBOX_SERVICE_NAME} default >/dev/null 2>&1 || true
         rm -f /etc/init.d/${SINGBOX_SERVICE_NAME}
     fi
-    rm -f "$SINGBOX_BIN" "$SINGBOX_LOG" "$SINGBOX_PID_FILE" "$SINGBOX_RESTART_CONF"
+    rm -f "$SINGBOX_BIN" "$SINGBOX_LOG" "$SINGBOX_PID_FILE"
     rm -rf "$SINGBOX_DIR"
 }
 
@@ -1496,6 +1360,43 @@ _uninstall_script() {
     exit 0
 }
 
+_service_control_menu() {
+    while true; do
+        clear
+        _show_status_header
+        echo -e " ${CYAN}【服务控制】${NC}"
+        _menu_item 1  "启动 Xray"
+        _menu_item 2  "停止 Xray"
+        _menu_item 3  "重启 Xray"
+        _menu_item 4  "查看 Xray 状态"
+        _menu_item 5  "查看 Xray 日志"
+        echo ""
+        _menu_item 6  "启动 Sing-box"
+        _menu_item 7  "停止 Sing-box"
+        _menu_item 8  "重启 Sing-box"
+        _menu_item 9  "查看 Sing-box 状态"
+        _menu_item 10 "查看 Sing-box 日志"
+        echo ""
+        _menu_exit 0 "返回主菜单"
+        echo -e "=================================================="
+        read -p "请选择 [0-10]: " sub
+        case "$sub" in
+            1) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
+            2) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
+            3) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
+            4) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
+            5) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
+            6) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service start; _pause ;;
+            7) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service stop; _pause ;;
+            8) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service restart; _pause ;;
+            9) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service status; _pause ;;
+            10) [ -f "$SINGBOX_BIN" ] && _view_singbox_log ;;
+            0) return 0 ;;
+            *) _error "无效输入。"; _pause ;;
+        esac
+    done
+}
+
 _show_status_header() {
     local xray_status="${RED}未安装${NC}"
     local xray_ver=""
@@ -1537,7 +1438,6 @@ _show_status_header() {
     else
         echo -e " Sing-box: ${singbox_status}"
     fi
-    echo -e " 定时重启: ${XRAY_RESTART_SCHEDULE:-off}"
     echo -e "--------------------------------------------------"
 }
 
@@ -1550,17 +1450,7 @@ _xray_menu() {
         _menu_item 1  "安装/更新 Xray 内核"
         _menu_item 2  "安装/更新 Sing-box 内核"
         _menu_item 3  "一键安装/更新双内核"
-        _menu_item 4  "启动 Xray"
-        _menu_item 5  "停止 Xray"
-        _menu_item 6  "重启 Xray"
-        _menu_item 7  "查看 Xray 状态"
-        _menu_item 8  "查看 Xray 日志"
-        _menu_item 9  "启动 Sing-box"
-        _menu_item 10 "停止 Sing-box"
-        _menu_item 11 "重启 Sing-box"
-        _menu_item 12 "查看 Sing-box 状态"
-        _menu_item 13 "查看 Sing-box 日志"
-        _menu_item 14 "Sing-box 内存回收设置"
+        _menu_item 4  "服务配置"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
         _menu_item 21 "添加 SS2022+Reality 节点"
@@ -1580,17 +1470,7 @@ _xray_menu() {
             1) _install_or_update_xray; _pause ;;
             2) _install_or_update_singbox; _pause ;;
             3) _install_or_update_dual_kernel; _pause ;;
-            4) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
-            5) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
-            6) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            7) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
-            8) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
-            9) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service start; _pause ;;
-            10) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service stop; _pause ;;
-            11) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service restart; _pause ;;
-            12) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service status; _pause ;;
-            13) [ -f "$SINGBOX_BIN" ] && _view_singbox_log ;;
-            14) _configure_singbox_memory_reclaim ;;
+            4) _service_control_menu ;;
             21) _init_xray_config; _add_ss2022_reality; _pause ;;
             22) _view_xray_nodes; _pause ;;
             23) _delete_xray_node; _pause ;;
@@ -1623,10 +1503,8 @@ _main() {
     fi
     if [ -f "$SINGBOX_BIN" ]; then
         _initialize_singbox_runtime_files
-        _load_singbox_restart_schedule
-        _create_singbox_service >/dev/null 2>&1 || true
-        _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
-    fi
+            _create_singbox_service >/dev/null 2>&1 || true
+        fi
     _xray_menu
 }
 
