@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.2"
+SCRIPT_VERSION="3.5"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -533,9 +533,25 @@ _get_cgroup_current_mb() {
 # 动态内存限制。这样可以保留脚本原有功能和配置逻辑不变，
 # 仅在内存控制方面与 xray_manager.sh 保持一致。
 _get_mem_limit() {
-    # xray_manager.sh 中没有针对 GOMEMLIMIT 的内存回收机制，
-    # 因此此处直接返回 0 以禁用 GOMEMLIMIT 设置。
-    echo 0
+    # 根据当前可用内存计算 Go 运行时的软内存限制（GOMEMLIMIT）。
+    # 优先使用 cgroup 的 memory limit，如果未设置则使用 /proc/meminfo 中的总内存。
+    # 预留 20% 内存给系统和其他进程，将 80% 的内存分配给 Go 运行时。
+    # 返回值支持 Go 解析的单位，例如 "512MiB"；如果计算值过小，则返回 0 表示不设置。
+    local total_mb limit_mb
+    total_mb=$(_get_effective_total_mem_mb)
+    # 若 total_mb 非数字或小于等于 0，则不设置限制
+    if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
+        echo 0
+        return 0
+    fi
+    # 计算 80% 的可用内存作为限制
+    limit_mb=$(( total_mb * 80 / 100 ))
+    # 若限制小于 128MiB，则不设置 GOMEMLIMIT
+    if [ "$limit_mb" -lt 128 ]; then
+        echo 0
+        return 0
+    fi
+    echo "${limit_mb}MiB"
 }
 
 # 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
@@ -611,7 +627,15 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    # 为 systemd 创建服务单元。不设置 GOMEMLIMIT 环境变量，以保持与 xrayManager.sh 一致。
+    # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
+    local mem_limit env_line
+    mem_limit=$(_get_mem_limit)
+    env_line=""
+    # 如果 mem_limit 非 0，则设置 Environment 指令
+    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
+        env_line="Environment=\"GOMEMLIMIT=${mem_limit}\""
+    fi
+    # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -619,6 +643,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
+${env_line}
 ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
@@ -634,13 +659,20 @@ EOF2
 
 _create_xray_openrc_service() {
     # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
-    # 避免日志文件持续增长导致的额外内存和 IO 占用。用户需要时可通过
-    # systemd 或其他方式查看运行日志。
+    # 避免日志文件持续增长导致的额外内存和 IO 占用。根据当前环境计算
+    # GOMEMLIMIT，并在启动命令中导出该变量。
+    local mem_limit cmd_args
+    mem_limit=$(_get_mem_limit)
+    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
+        cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+    else
+        cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+    fi
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+command_args="${cmd_args}"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
