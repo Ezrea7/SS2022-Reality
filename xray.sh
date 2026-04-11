@@ -19,6 +19,12 @@ XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
 
+# IP preference configuration file used to determine whether IPv4 or IPv6 should
+# be attempted first when detecting the server's public address. Possible
+# values are "ipv4" or "ipv6". If this file does not exist or contains an
+# invalid value, the default is "ipv4".
+IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -160,15 +166,29 @@ _update_script_self() {
 }
 
 _get_public_ip() {
+    # If we've already detected the IP during this session, return cached value.
     [ -n "$server_ip" ] && { echo "$server_ip"; return; }
-    local ip=""
+    local ip="" pref
+    pref=$(_get_ip_preference)
+    # Attempt detection with curl if available, following user preference first.
     if command -v curl >/dev/null 2>&1; then
-        ip=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null)
-        [ -z "$ip" ] && ip=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null)
+        if [ "$pref" = "ipv6" ]; then
+            ip=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null)
+            [ -z "$ip" ] && ip=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null)
+        else
+            ip=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null)
+            [ -z "$ip" ] && ip=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null)
+        fi
     fi
+    # Fallback to wget if curl didn't yield a result
     if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
-        ip=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null)
-        [ -z "$ip" ] && ip=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null)
+        if [ "$pref" = "ipv6" ]; then
+            ip=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null)
+            [ -z "$ip" ] && ip=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null)
+        else
+            ip=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null)
+            [ -z "$ip" ] && ip=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null)
+        fi
     fi
     server_ip="$ip"
     echo "$ip"
@@ -184,6 +204,113 @@ _atomic_modify_json() {
         _error "JSON 修改失败。"
         return 1
     fi
+}
+
+# -----------------------------------------------------------------------------
+# IP preference helpers
+#
+# The script supports selecting a preferred IP address family (IPv4 or IPv6)
+# when performing network operations such as public IP discovery. The chosen
+# preference is persisted in a simple configuration file within the Xray
+# configuration directory. If no preference is set, IPv4 is assumed by
+# default. These helper functions handle reading and writing this preference
+# as well as presenting a user-facing menu for changing it.
+
+# Return the currently configured IP family preference. If the preference
+# file does not exist or contains an unexpected value, "ipv4" is returned.
+_get_ip_preference() {
+    local pref=""
+    if [ -f "$IP_PREF_FILE" ]; then
+        pref=$(tr -d '\n\r' < "$IP_PREF_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
+    fi
+    case "$pref" in
+        ipv4|ipv6) echo "$pref" ;;
+        *) echo "ipv4" ;;
+    esac
+}
+
+# Persist the given IP family preference to disk. Accepts only "ipv4" or
+# "ipv6" as valid arguments. Returns 0 on success, 1 on failure.
+_set_ip_preference() {
+    local pref="$1"
+    case "$pref" in
+        ipv4|ipv6)
+            mkdir -p "$XRAY_DIR" 2>/dev/null || true
+            echo "$pref" > "$IP_PREF_FILE" 2>/dev/null || return 1
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Interactive menu allowing the user to choose between IPv4- or IPv6-first
+# behaviour for public IP detection. Displays the current preference and
+# shows the current detected IPv4 and IPv6 public addresses if available.
+_choose_ip_preference() {
+    local current
+    current=$(_get_ip_preference)
+    # Detect current IPv4 and IPv6 addresses separately.
+    local ip4="" ip6=""
+    # Attempt detection using curl
+    if command -v curl >/dev/null 2>&1; then
+        # IPv4
+        ip4=$(timeout 5 curl -s4 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s4 --max-time 3 ipinfo.io/ip 2>/dev/null || true)
+        # IPv6
+        ip6=$(timeout 5 curl -s6 --max-time 3 icanhazip.com 2>/dev/null || timeout 5 curl -s6 --max-time 3 ipinfo.io/ip 2>/dev/null || true)
+    fi
+    # Attempt detection using wget if either is missing
+    if command -v wget >/dev/null 2>&1; then
+        if [ -z "$ip4" ]; then
+            ip4=$(timeout 5 wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -4 --timeout=3 ipinfo.io/ip 2>/dev/null || true)
+        fi
+        if [ -z "$ip6" ]; then
+            ip6=$(timeout 5 wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null || timeout 5 wget -qO- -6 --timeout=3 ipinfo.io/ip 2>/dev/null || true)
+        fi
+    fi
+    echo ""
+    # Display the current preference using proper casing (IPv4/IPv6)
+    local display_pref
+    if [ "$current" = "ipv6" ]; then
+        display_pref="IPv6"
+    else
+        display_pref="IPv4"
+    fi
+    echo -e "${CYAN}当前网络优先级设置: ${NC}${GREEN}${display_pref} 优先${NC}"
+    echo ""
+    # Display detected IP addresses; show '无' if not found
+    echo -e "检测到 IPv4 地址: ${YELLOW}${ip4:-无}${NC}"
+    echo -e "检测到 IPv6 地址: ${YELLOW}${ip6:-无}${NC}"
+    echo ""
+    echo "请选择网络优先级:"
+    echo -e "  ${GREEN}[1]${NC} IPv4 优先"
+    echo -e "  ${GREEN}[2]${NC} IPv6 优先"
+    echo -e "  ${YELLOW}[0]${NC} 返回上一级"
+    read -p "请选择 [0-2]: " choice
+    case "$choice" in
+        1)
+            if _set_ip_preference ipv4; then
+                _success "已设置 IPv4 优先。"
+            else
+                _error "设置 IPv4 优先失败。"
+            fi
+            ;;
+        2)
+            if _set_ip_preference ipv6; then
+                _success "已设置 IPv6 优先。"
+            else
+                _error "设置 IPv6 优先失败。"
+            fi
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            _error "无效输入。"
+            ;;
+    esac
+    _pause
 }
 
 
@@ -566,6 +693,8 @@ _install_or_update_xray() {
     if [ "$is_first_install" = true ]; then
         _info "首次安装 Xray，正在初始化配置与服务..."
         _init_xray_config
+        # Default to IPv4 priority on first installation; ignore errors.
+        _set_ip_preference ipv4 >/dev/null 2>&1 || true
         _create_xray_service
         _manage_xray_service start
         _success "Xray 首次安装完成并已启动。"
@@ -906,6 +1035,7 @@ _xray_menu() {
         _menu_item 9  "删除节点"
         _menu_item 10 "修改节点端口"
         _menu_item 11 "更新脚本"
+        _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
         echo ""
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
@@ -924,6 +1054,7 @@ _xray_menu() {
             9) _delete_xray_node; _pause ;;
             10) _modify_xray_port; _pause ;;
             11) _update_script_self; _pause; exit 0 ;;
+            12) _choose_ip_preference ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
