@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -633,8 +633,9 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    touch "${XRAY_LOG}" 2>/dev/null || true
-    # 创建 openrc 服务，不设置 GOMEMLIMIT 环境变量，以保持与 xrayManager.sh 一致。
+    # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
+    # 避免日志文件持续增长导致的额外内存和 IO 占用。用户需要时可通过
+    # systemd 或其他方式查看运行日志。
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
@@ -644,8 +645,9 @@ supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
-output_log="${XRAY_LOG}"
-error_log="${XRAY_LOG}"
+# 不保存运行日志，保持最小 IO 占用。如果需要查看日志，可使用 systemd/journal 或在配置中调整 loglevel。
+output_log="/dev/null"
+error_log="/dev/null"
 
 depend() {
     need net
@@ -771,11 +773,9 @@ _view_xray_log() {
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         journalctl -u xray -n 50 --no-pager -f
     elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        if [ -f "$XRAY_LOG" ]; then
-            tail -n 50 -f "$XRAY_LOG"
-        else
-            _warn "未找到 ${XRAY_LOG}，请先启动 Xray。"
-        fi
+        # 在 openrc 模式下，我们默认不持久保存日志（见 _create_xray_openrc_service），因此没有文件可供查看。
+        # 如果用户需要查看日志，可以通过修改配置中的 loglevel 并手动重定向输出。
+        _warn "当前 openrc 服务未保存日志。如需查看日志，请调整服务脚本或使用其他方式获取输出。"
     else
         _warn "未检测到日志管理器。"
     fi
