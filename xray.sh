@@ -19,19 +19,18 @@ XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
 
-# ===== Memory & Core Selection =====
-XRAY_MEM_MODE="${XRAY_MEM_MODE:-off}"
-XRAY_GOMEMLIMIT_PERCENT="${XRAY_GOMEMLIMIT_PERCENT:-90}"
-XRAY_GOMEMLIMIT_MIN_MB="${XRAY_GOMEMLIMIT_MIN_MB:-10}"
-XRAY_RESTART_SCHEDULE="${XRAY_RESTART_SCHEDULE:-off}"
-XRAY_SYSTEMD_MEMORY_HIGH="${XRAY_SYSTEMD_MEMORY_HIGH:-}"
-XRAY_SYSTEMD_MEMORY_MAX="${XRAY_SYSTEMD_MEMORY_MAX:-}"
-XRAY_SYSTEMD_MEMORY_SWAP_MAX="${XRAY_SYSTEMD_MEMORY_SWAP_MAX:-}"
-XRAY_OOM_SCORE_ADJ="${XRAY_OOM_SCORE_ADJ:-}"
-
-XRAY_INSTALL_LOCK_DIR="/var/lock/xray-script-install.lock"
-XRAY_ENV_FILE="${XRAY_DIR}/xray.env"
-XRAY_MEM_CONF="${XRAY_DIR}/memory.conf"
+SINGBOX_BIN="/usr/local/bin/sing-box"
+SINGBOX_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
+SINGBOX_RELAY_CONFIG="${SINGBOX_DIR}/relay.json"
+SINGBOX_LOG="/var/log/sing-box.log"
+SINGBOX_PID_FILE="/tmp/sing-box.pid"
+SINGBOX_SERVICE_NAME="sing-box"
+SINGBOX_RESTART_CONF="${SINGBOX_DIR}/restart_schedule.conf"
+ENABLE_DEPRECATED_LEGACY_DNS_SERVERS="true"
+ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM="true"
+ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER="true"
+INSTALL_LOCK_DIR="/tmp/xray-script-install.lock"
 
 # IP preference configuration file used to determine whether IPv4 or IPv6 should
 # be attempted first when detecting the server's public address. Possible
@@ -50,7 +49,7 @@ _success() { echo -e "${GREEN}[成功] $1${NC}" >&2; }
 _warn()    { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
 
-trap 'rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
+trap 'rm -f "${XRAY_DIR}"/*.tmp.* "${SINGBOX_DIR}"/*.tmp.* 2>/dev/null || true; rmdir "${INSTALL_LOCK_DIR}" 2>/dev/null || true' EXIT
 
 _pause() {
     echo ""
@@ -102,7 +101,7 @@ _pkg_install() {
 
 _ensure_deps() {
     local missing=()
-    for c in jq openssl awk sed grep; do
+    for c in jq openssl awk sed grep tar; do
         command -v "$c" >/dev/null 2>&1 || missing+=("$c")
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing+=("curl")
@@ -112,6 +111,23 @@ _ensure_deps() {
         [ -f /etc/ssl/certs/ca-certificates.crt ] || missing+=("ca-certificates")
     fi
     [ ${#missing[@]} -gt 0 ] && _pkg_install "${missing[@]}"
+}
+
+_acquire_install_lock() {
+    local waited=0
+    while ! mkdir "$INSTALL_LOCK_DIR" 2>/dev/null; do
+        if [ $waited -ge 30 ]; then
+            _error "检测到另一个安装/更新任务正在执行，请稍后再试。"
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
+}
+
+_release_install_lock() {
+    rmdir "$INSTALL_LOCK_DIR" 2>/dev/null || true
 }
 
 _install_script_shortcut() {
@@ -390,143 +406,6 @@ _choose_ip_preference() {
 }
 
 
-_load_memory_settings() {
-    [ -f "$XRAY_MEM_CONF" ] || return 0
-    while IFS='=' read -r k v; do
-        [ -n "$k" ] || continue
-        case "$k" in
-            XRAY_MEM_MODE|XRAY_GOMEMLIMIT_PERCENT|XRAY_GOMEMLIMIT_MIN_MB|XRAY_RESTART_SCHEDULE|XRAY_SYSTEMD_MEMORY_HIGH|XRAY_SYSTEMD_MEMORY_MAX|XRAY_SYSTEMD_MEMORY_SWAP_MAX|XRAY_OOM_SCORE_ADJ)
-                eval "$k=\"${v}\""
-                ;;
-        esac
-    done < "$XRAY_MEM_CONF"
-}
-
-_save_memory_settings() {
-    mkdir -p "$XRAY_DIR" 2>/dev/null || true
-    cat > "$XRAY_MEM_CONF" <<EOF
-XRAY_MEM_MODE=${XRAY_MEM_MODE}
-XRAY_GOMEMLIMIT_PERCENT=${XRAY_GOMEMLIMIT_PERCENT}
-XRAY_GOMEMLIMIT_MIN_MB=${XRAY_GOMEMLIMIT_MIN_MB}
-XRAY_RESTART_SCHEDULE=${XRAY_RESTART_SCHEDULE}
-XRAY_SYSTEMD_MEMORY_HIGH=${XRAY_SYSTEMD_MEMORY_HIGH}
-XRAY_SYSTEMD_MEMORY_MAX=${XRAY_SYSTEMD_MEMORY_MAX}
-XRAY_SYSTEMD_MEMORY_SWAP_MAX=${XRAY_SYSTEMD_MEMORY_SWAP_MAX}
-XRAY_OOM_SCORE_ADJ=${XRAY_OOM_SCORE_ADJ}
-EOF
-}
-
-_http_get() {
-    local url="$1" out="$2"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 300 -o "$out" "$url"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --tries=3 --timeout=30 -O "$out" "$url"
-    else
-        _error "缺少 curl/wget，无法下载。"
-        return 1
-    fi
-}
-
-_sha256_file() {
-    local f="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$f" | awk '{print $1}'
-    else
-        openssl dgst -sha256 "$f" | awk '{print $NF}'
-    fi
-}
-
-_install_lock_acquire() {
-    mkdir -p "$(dirname "$XRAY_INSTALL_LOCK_DIR")" 2>/dev/null || true
-    if mkdir "$XRAY_INSTALL_LOCK_DIR" 2>/dev/null; then
-        echo "$$" > "${XRAY_INSTALL_LOCK_DIR}/pid" 2>/dev/null || true
-        trap '_install_lock_release; rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
-        return 0
-    fi
-    _error "检测到已有安装/更新任务在执行，请稍后再试。"
-    return 1
-}
-
-_install_lock_release() {
-    rm -rf "$XRAY_INSTALL_LOCK_DIR" 2>/dev/null || true
-}
-
-_xray_detect_asset_suffix_linux() {
-    local arch
-    arch="$(uname -m 2>/dev/null || echo unknown)"
-    case "$arch" in
-        x86_64|amd64) echo "64" ;;
-        i386|i686) echo "32" ;;
-        aarch64|arm64) echo "arm64-v8a" ;;
-        armv7l|armv7) echo "arm32-v7a" ;;
-        armv6l) echo "arm32-v6" ;;
-        armv5*|armv5tel|armv5tejl) echo "arm32-v5" ;;
-        loong64) echo "loong64" ;;
-        riscv64) echo "riscv64" ;;
-        s390x) echo "s390x" ;;
-        mips) echo "mips32" ;;
-        mipsel|mipsle) echo "mips32le" ;;
-        mips64) echo "mips64" ;;
-        mips64el|mips64le) echo "mips64le" ;;
-        ppc64) echo "ppc64" ;;
-        ppc64le) echo "ppc64le" ;;
-        *)
-            _error "不支持的架构: ${arch}"
-            return 1
-            ;;
-    esac
-}
-
-_xray_verify_zip_with_dgst() {
-    local zip="$1" dgst="$2" expect got
-    expect="$(grep -iE '^SHA256=' "$dgst" 2>/dev/null | head -n1 | awk -F'= *' '{print $2}' | tr -d '[:space:]')"
-    [ -n "$expect" ] || expect="$(grep -i 'sha256' "$dgst" 2>/dev/null | grep -Eo '[A-Fa-f0-9]{64}' | head -n1)"
-    [ -n "$expect" ] || { _error "无法从 dgst 文件解析 SHA256。"; return 1; }
-    got="$(_sha256_file "$zip" 2>/dev/null | tr -d '[:space:]')"
-    [ -n "$got" ] || { _error "无法计算安装包 SHA256。"; return 1; }
-    [ "$got" = "$expect" ] || { _error "SHA256 校验失败。"; return 1; }
-    return 0
-}
-
-_xray_download_verify_install_linux() {
-    local suffix zip_name dgst_name base tmp_dir zip_path dgst_path version backup_bin ts
-    suffix="$(_xray_detect_asset_suffix_linux)" || return 1
-    zip_name="Xray-linux-${suffix}.zip"
-    dgst_name="${zip_name}.dgst"
-    base="https://github.com/XTLS/Xray-core/releases/latest/download"
-    tmp_dir="$(mktemp -d -p /var/tmp xray.XXXXXX 2>/dev/null || mktemp -d)"
-    zip_path="${tmp_dir}/${zip_name}"
-    dgst_path="${tmp_dir}/${dgst_name}"
-
-    _info "目标内核架构包: ${zip_name}"
-    _http_get "${base}/${zip_name}" "$zip_path" || { rm -rf "$tmp_dir"; return 1; }
-    _http_get "${base}/${dgst_name}" "$dgst_path" || { rm -rf "$tmp_dir"; return 1; }
-
-    _info "正在校验 Xray 安装包 SHA256..."
-    _xray_verify_zip_with_dgst "$zip_path" "$dgst_path" || { rm -rf "$tmp_dir"; return 1; }
-
-    if [ -f "$XRAY_BIN" ]; then
-        ts="$(date +%Y%m%d%H%M%S)"
-        backup_bin="${XRAY_BIN}.bak.${ts}"
-        cp -f "$XRAY_BIN" "$backup_bin" 2>/dev/null || true
-        _info "已备份旧内核: ${backup_bin}"
-    fi
-
-    command -v unzip >/dev/null 2>&1 || _pkg_install unzip
-    (cd "$tmp_dir" && unzip -qo "$zip_name") || { _error "Xray 解压失败。"; rm -rf "$tmp_dir"; return 1; }
-    [ -f "${tmp_dir}/xray" ] || { _error "压缩包内未找到 xray 可执行文件。"; rm -rf "$tmp_dir"; return 1; }
-
-    install -m 0755 "${tmp_dir}/xray" "$XRAY_BIN" || { _error "安装 Xray 可执行文件失败。"; rm -rf "$tmp_dir"; return 1; }
-    mkdir -p "$XRAY_DIR"
-    [ -f "${tmp_dir}/geoip.dat" ] && install -m 0644 "${tmp_dir}/geoip.dat" "$XRAY_DIR/geoip.dat" || true
-    [ -f "${tmp_dir}/geosite.dat" ] && install -m 0644 "${tmp_dir}/geosite.dat" "$XRAY_DIR/geosite.dat" || true
-    rm -rf "$tmp_dir"
-    return 0
-}
-
-
-
 
 
 _get_meminfo_total_mb() {
@@ -673,46 +552,411 @@ _get_cgroup_current_mb() {
     return 1
 }
 
-_get_mem_limit() {
-    case "$XRAY_MEM_MODE" in
-        off|"")
-            echo 0
-            return 0
-            ;;
-        singbox-compat)
-            local total_mb limit_mb
-            total_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
-            if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
-                echo 0
-                return 0
+# 智能 GOMEMLIMIT 计算：
+# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
+# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
+# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
+# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
+# 内存限制计算函数
+#
+# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
+# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
+# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
+# ===== Sing-box 自动安装与内存治理模块（从 singbox.sh 迁移） =====
+
+_get_singbox_mem_limit() {
+    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
+    local limit=$((total_mem_mb * 90 / 100))
+    [ "$limit" -lt 10 ] && limit=10
+    echo "$limit"
+}
+
+_initialize_singbox_runtime_files() {
+    mkdir -p "$SINGBOX_DIR"
+    if [ ! -s "$SINGBOX_CONFIG" ]; then
+        cat > "$SINGBOX_CONFIG" <<'EOF'
+{
+  "ntp": {
+    "enabled": true,
+    "server": "time.apple.com",
+    "server_port": 123,
+    "interval": "30m"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-cloudflare",
+        "address": "https://1.1.1.1/dns-query",
+        "detour": "direct"
+      },
+      {
+        "tag": "dns-aliyun",
+        "address": "https://223.5.5.5/dns-query",
+        "detour": "direct"
+      }
+    ],
+    "rules": [
+      {
+        "outbound": "any",
+        "server": "dns-cloudflare"
+      }
+    ],
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [],
+    "final": "direct"
+  }
+}
+EOF
+    fi
+    if [ ! -s "$SINGBOX_RELAY_CONFIG" ]; then
+        echo '{"inbounds":[],"outbounds":[],"route":{"rules":[]}}' > "$SINGBOX_RELAY_CONFIG"
+    fi
+    touch "$SINGBOX_LOG" 2>/dev/null || true
+}
+
+_install_sing_box() {
+    _info "正在安装最新稳定版 sing-box..."
+    local arch=$(uname -m)
+    local arch_tag
+    case $arch in
+        x86_64|amd64) arch_tag='amd64' ;;
+        aarch64|arm64) arch_tag='arm64' ;;
+        armv7l) arch_tag='armv7' ;;
+        *) _error "不支持的架构：$arch"; return 1 ;;
+    esac
+
+    local libc_suffix=""
+    if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then
+        _info "检测到 musl libc (Alpine 等系统)，将下载 musl 版本..."
+        libc_suffix="-musl"
+    fi
+
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+    local search_pattern="linux-${arch_tag}${libc_suffix}.tar.gz"
+    local release_info download_url checksum_url tmp_tar temp_dir checksums dl_filename expected_hash actual_hash
+    release_info=$(curl -fsSL "$api_url" 2>/dev/null || wget -qO- "$api_url" 2>/dev/null) || { _error "无法获取 sing-box 发布信息。"; return 1; }
+    download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains("${search_pattern}")) | .browser_download_url" | head -1)
+    checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith("checksums.txt")) | .browser_download_url' | head -1)
+
+    if [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
+        _error "无法获取 sing-box 下载链接 (搜索: ${search_pattern})。"
+        return 1
+    fi
+
+    tmp_tar=$(mktemp -p /var/tmp sing-box.XXXXXX.tar.gz 2>/dev/null || mktemp /tmp/sing-box.XXXXXX.tar.gz)
+    if command -v curl >/dev/null 2>&1; then
+        curl -LfsS "$download_url" -o "$tmp_tar" || { rm -f "$tmp_tar"; _error "下载 sing-box 失败。"; return 1; }
+    else
+        wget -qO "$tmp_tar" "$download_url" || { rm -f "$tmp_tar"; _error "下载 sing-box 失败。"; return 1; }
+    fi
+
+    if [ -n "$checksum_url" ] && [ "$checksum_url" != "null" ]; then
+        _info "正在进行 SHA256 完整性校验..."
+        checksums=$(curl -fsSL "$checksum_url" 2>/dev/null || wget -qO- "$checksum_url" 2>/dev/null)
+        if [ -n "$checksums" ]; then
+            dl_filename=$(basename "$download_url")
+            expected_hash=$(echo "$checksums" | grep "$dl_filename" | awk '{print $1}' | head -n1)
+            if [ -n "$expected_hash" ]; then
+                actual_hash=$(sha256sum "$tmp_tar" | awk '{print $1}')
+                if [ "$expected_hash" != "$actual_hash" ]; then
+                    _error "sing-box SHA256 校验失败。"
+                    rm -f "$tmp_tar"
+                    return 1
+                fi
+                _success "sing-box SHA256 校验通过。"
+            else
+                _warn "校验文件中未找到匹配条目，跳过 sing-box 校验。"
             fi
-            limit_mb=$(( total_mb * XRAY_GOMEMLIMIT_PERCENT / 100 ))
-            [ "$limit_mb" -lt "$XRAY_GOMEMLIMIT_MIN_MB" ] && limit_mb="$XRAY_GOMEMLIMIT_MIN_MB"
-            echo "${limit_mb}MiB"
-            return 0
-            ;;
-        auto-safe)
-            local total_mb reserve_mb budget_mb
-            total_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
-            if ! [[ "$total_mb" =~ ^[0-9]+$ ]] || [ "$total_mb" -le 0 ]; then
-                echo 0
-                return 0
-            fi
-            reserve_mb=$(( total_mb / 5 ))
-            [ "$reserve_mb" -lt 64 ] && reserve_mb=64
-            budget_mb=$(( total_mb - reserve_mb ))
-            [ "$budget_mb" -lt "$XRAY_GOMEMLIMIT_MIN_MB" ] && budget_mb="$XRAY_GOMEMLIMIT_MIN_MB"
-            echo "${budget_mb}MiB"
-            return 0
-            ;;
-        *)
-            _warn "未知 XRAY_MEM_MODE=${XRAY_MEM_MODE}，已回退为 off。"
-            echo 0
-            return 0
-            ;;
+        else
+            _warn "校验文件下载失败，跳过 sing-box 校验。"
+        fi
+    else
+        _warn "未找到 sing-box SHA256 校验文件，跳过完整性校验。"
+    fi
+
+    temp_dir=$(mktemp -d -p /var/tmp singbox.XXXXXX 2>/dev/null || mktemp -d)
+    tar -xzf "$tmp_tar" -C "$temp_dir" || { rm -f "$tmp_tar"; rm -rf "$temp_dir"; _error "解压 sing-box 失败。"; return 1; }
+    install -m 0755 "$temp_dir"/sing-box-*/sing-box "$SINGBOX_BIN" || { rm -f "$tmp_tar"; rm -rf "$temp_dir"; _error "安装 sing-box 失败。"; return 1; }
+    rm -f "$tmp_tar"
+    rm -rf "$temp_dir"
+    _success "sing-box 安装成功, 版本: $($SINGBOX_BIN version 2>/dev/null | head -n1)"
+}
+
+_create_singbox_systemd_service() {
+    local mem_limit_mb=$(_get_singbox_mem_limit)
+    cat > /etc/systemd/system/${SINGBOX_SERVICE_NAME}.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+Environment="GOMEMLIMIT=${mem_limit_mb}MiB"
+Environment="ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true"
+Environment="ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true"
+Environment="ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true"
+ExecStart=${SINGBOX_BIN} run -c ${SINGBOX_CONFIG} -c ${SINGBOX_RELAY_CONFIG}
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable ${SINGBOX_SERVICE_NAME} >/dev/null 2>&1 || true
+}
+
+_create_singbox_openrc_service() {
+    touch "$SINGBOX_LOG"
+    local mem_limit_mb=$(_get_singbox_mem_limit)
+    cat > /etc/init.d/${SINGBOX_SERVICE_NAME} <<EOF
+#!/sbin/openrc-run
+
+description="sing-box service"
+command="${SINGBOX_BIN}"
+command_args="run -c ${SINGBOX_CONFIG} -c ${SINGBOX_RELAY_CONFIG}"
+supervisor="supervise-daemon"
+supervise_daemon_args="--env GOMEMLIMIT=${mem_limit_mb}MiB --env ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true --env ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true --env ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true"
+respawn_delay=3
+respawn_max=0
+
+pidfile="${SINGBOX_PID_FILE}"
+output_log="${SINGBOX_LOG}"
+error_log="${SINGBOX_LOG}"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x /etc/init.d/${SINGBOX_SERVICE_NAME}
+    rc-update add ${SINGBOX_SERVICE_NAME} default >/dev/null 2>&1 || true
+}
+
+_create_singbox_service() {
+    _initialize_singbox_runtime_files
+    case "$INIT_SYSTEM" in
+        systemd) _create_singbox_systemd_service ;;
+        openrc) _create_singbox_openrc_service ;;
+        *) _warn "未检测到 systemd/openrc，请手动管理 sing-box 进程。" ;;
     esac
 }
 
+_manage_singbox_service() {
+    local action="$1"
+    case "$INIT_SYSTEM" in
+        systemd)
+            if [ "$action" = "status" ]; then
+                systemctl status ${SINGBOX_SERVICE_NAME} --no-pager
+                return
+            fi
+            systemctl "$action" ${SINGBOX_SERVICE_NAME} >/dev/null 2>&1 || { _error "sing-box 服务${action}失败。"; return 1; }
+            ;;
+        openrc)
+            if [ "$action" = "status" ]; then
+                rc-service ${SINGBOX_SERVICE_NAME} status
+                return
+            fi
+            rc-service ${SINGBOX_SERVICE_NAME} "$action" >/dev/null 2>&1 || { _error "sing-box 服务${action}失败。"; return 1; }
+            ;;
+        *) _warn "未检测到服务管理器，跳过 sing-box ${action}。" ;;
+    esac
+}
+
+_view_singbox_log() {
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        _info "按 Ctrl+C 退出日志查看。"
+        journalctl -u ${SINGBOX_SERVICE_NAME} -f --no-pager
+    else
+        [ -f "$SINGBOX_LOG" ] || { _warn "日志文件不存在。"; return; }
+        _info "按 Ctrl+C 退出日志查看。"
+        tail -f "$SINGBOX_LOG"
+    fi
+}
+
+_install_or_update_singbox() {
+    _acquire_install_lock || return 1
+    if [ -f "$SINGBOX_BIN" ]; then
+        local current_ver
+        current_ver=$($SINGBOX_BIN version 2>/dev/null | head -n1 | awk '{print $3}')
+        _info "当前 Sing-box 版本: v${current_ver}，正在检查更新..."
+    else
+        _info "Sing-box 核心未安装，正在执行首次安装..."
+    fi
+    _install_sing_box || { _release_install_lock; return 1; }
+    _initialize_singbox_runtime_files
+    _load_singbox_restart_schedule
+    _create_singbox_service
+    _manage_singbox_service restart >/dev/null 2>&1 || _manage_singbox_service start >/dev/null 2>&1 || true
+    _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
+    _release_install_lock
+    _success "sing-box 安装/更新成功。"
+}
+
+_xray_restart_timer_install_systemd() {
+    local time_str="$1"
+    cat > /etc/systemd/system/xray-restart.service <<EOF
+[Unit]
+Description=Sing-box Scheduled Restart
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart ${SINGBOX_SERVICE_NAME}
+EOF
+
+    cat > /etc/systemd/system/xray-restart.timer <<EOF
+[Unit]
+Description=Sing-box Scheduled Restart Timer
+[Timer]
+OnCalendar=*-*-* ${time_str}:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now xray-restart.timer >/dev/null 2>&1 || return 1
+    return 0
+}
+
+_xray_restart_timer_install_openrc() {
+    local time_str="$1"
+    cat > /usr/local/bin/xray-timer.sh <<'EOF'
+#!/bin/sh
+TARGET_TIME="$1"
+while true; do
+  if [ "$(date +%H:%M)" = "$TARGET_TIME" ]; then
+    rc-service sing-box restart >/dev/null 2>&1 || true
+    sleep 61
+  fi
+  sleep 30
+done
+EOF
+    chmod +x /usr/local/bin/xray-timer.sh
+    cat > /etc/init.d/xray-timer <<EOF
+#!/sbin/openrc-run
+description="Sing-box Scheduled Restart Timer"
+command="/usr/local/bin/xray-timer.sh"
+command_args="${time_str}"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=0
+pidfile="/run/xray-timer.pid"
+depend() { need net; after firewall; }
+EOF
+    chmod +x /etc/init.d/xray-timer
+    rc-update add xray-timer default >/dev/null 2>&1 || true
+    rc-service xray-timer start >/dev/null 2>&1 || true
+}
+
+_xray_restart_timer_remove() {
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable --now xray-restart.timer >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/xray-restart.timer /etc/systemd/system/xray-restart.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service xray-timer stop >/dev/null 2>&1 || true
+        rc-update del xray-timer default >/dev/null 2>&1 || true
+        rm -f /etc/init.d/xray-timer /usr/local/bin/xray-timer.sh
+    fi
+}
+
+_load_singbox_restart_schedule() {
+    if [ -s "$SINGBOX_RESTART_CONF" ]; then
+        XRAY_RESTART_SCHEDULE=$(tr -d '[:space:]' < "$SINGBOX_RESTART_CONF")
+    else
+        XRAY_RESTART_SCHEDULE="off"
+    fi
+}
+
+_save_singbox_restart_schedule() {
+    mkdir -p "$SINGBOX_DIR"
+    echo "${XRAY_RESTART_SCHEDULE:-off}" > "$SINGBOX_RESTART_CONF"
+}
+
+_xray_restart_timer_apply_from_var() {
+    local t="${XRAY_RESTART_SCHEDULE:-off}"
+    if [ -z "$t" ] || [ "$t" = "off" ]; then
+        _xray_restart_timer_remove
+        _save_singbox_restart_schedule
+        return 0
+    fi
+    echo "$t" | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || { _error "XRAY_RESTART_SCHEDULE 格式错误，应为 HH:MM 或 off"; return 1; }
+    _xray_restart_timer_remove
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        _xray_restart_timer_install_systemd "$t" || return 1
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        _xray_restart_timer_install_openrc "$t" || return 1
+    else
+        _warn "unknown init：不自动创建定时任务。"
+        return 1
+    fi
+    _save_singbox_restart_schedule
+    _success "已启用 sing-box 定时重启：每天 ${t}"
+}
+
+_configure_singbox_memory_reclaim() {
+    while true; do
+        clear
+        echo ""
+        echo -e "=================================================="
+        echo -e " Sing-box 内存回收设置"
+        echo -e "=================================================="
+        echo " 当前 GOMEMLIMIT 算法: total_mem * 90% (最小 10MiB)"
+        echo " 当前定时重启: ${XRAY_RESTART_SCHEDULE:-off}"
+        echo ""
+        _menu_item 1 "设置每天定时重启 sing-box"
+        _menu_item 2 "关闭定时重启 sing-box"
+        _menu_exit 0 "返回上级菜单"
+        read -p "请选择 [0-2]: " sub
+        case "$sub" in
+            1)
+                read -p "请输入每天重启时间 (HH:MM): " t
+                XRAY_RESTART_SCHEDULE="$t"
+                _xray_restart_timer_apply_from_var
+                _pause
+                ;;
+            2)
+                XRAY_RESTART_SCHEDULE=off
+                _xray_restart_timer_apply_from_var
+                _pause
+                ;;
+            0) return 0 ;;
+            *) _error "无效输入。"; _pause ;;
+        esac
+    done
+}
+
+_remove_singbox_runtime() {
+    _manage_singbox_service stop >/dev/null 2>&1 || true
+    _xray_restart_timer_remove >/dev/null 2>&1 || true
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable ${SINGBOX_SERVICE_NAME} >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/${SINGBOX_SERVICE_NAME}.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service ${SINGBOX_SERVICE_NAME} stop >/dev/null 2>&1 || true
+        rc-update del ${SINGBOX_SERVICE_NAME} default >/dev/null 2>&1 || true
+        rm -f /etc/init.d/${SINGBOX_SERVICE_NAME}
+    fi
+    rm -f "$SINGBOX_BIN" "$SINGBOX_LOG" "$SINGBOX_PID_FILE" "$SINGBOX_RESTART_CONF"
+    rm -rf "$SINGBOX_DIR"
+}
+
+_get_mem_limit() {
+    echo 0
+    return 0
+}
+
+# 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
 
 _check_port_occupied() {
     local port="$1"
@@ -785,26 +1029,15 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    local mem_limit env_line oom_line mem_high_line mem_max_line mem_swap_line env_file_line
-    mem_limit="$(_get_mem_limit)"
+    # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
+    local mem_limit env_line
+    mem_limit=$(_get_mem_limit)
     env_line=""
-    env_file_line=""
-    oom_line=""
-    mem_high_line=""
-    mem_max_line=""
-    mem_swap_line=""
-
-    mkdir -p "$XRAY_DIR" 2>/dev/null || true
-    : > "$XRAY_ENV_FILE"
+    # 如果 mem_limit 非 0，则设置 Environment 指令
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        echo "GOMEMLIMIT=${mem_limit}" > "$XRAY_ENV_FILE"
-        env_file_line="EnvironmentFile=-${XRAY_ENV_FILE}"
+        env_line="Environment=\"GOMEMLIMIT=${mem_limit}\""
     fi
-    [ -n "$XRAY_OOM_SCORE_ADJ" ] && oom_line="OOMScoreAdjust=${XRAY_OOM_SCORE_ADJ}"
-    [ -n "$XRAY_SYSTEMD_MEMORY_HIGH" ] && mem_high_line="MemoryHigh=${XRAY_SYSTEMD_MEMORY_HIGH}"
-    [ -n "$XRAY_SYSTEMD_MEMORY_MAX" ] && mem_max_line="MemoryMax=${XRAY_SYSTEMD_MEMORY_MAX}"
-    [ -n "$XRAY_SYSTEMD_MEMORY_SWAP_MAX" ] && mem_swap_line="MemorySwapMax=${XRAY_SYSTEMD_MEMORY_SWAP_MAX}"
-
+    # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -812,17 +1045,12 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-${env_file_line}
 ${env_line}
 ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
 NoNewPrivileges=true
-${oom_line}
-${mem_high_line}
-${mem_max_line}
-${mem_swap_line}
 
 [Install]
 WantedBy=multi-user.target
@@ -832,21 +1060,26 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    local mem_limit cmd_prefix
-    mem_limit="$(_get_mem_limit)"
-    cmd_prefix=""
+    # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
+    # 避免日志文件持续增长导致的额外内存和 IO 占用。根据当前环境计算
+    # GOMEMLIMIT，并在启动命令中导出该变量。
+    local mem_limit cmd_args
+    mem_limit=$(_get_mem_limit)
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cmd_prefix="export GOMEMLIMIT=${mem_limit}; "
+        cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+    else
+        cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
     fi
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="/bin/sh"
-command_args="-c '${cmd_prefix}exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+command_args="${cmd_args}"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
+# 不保存运行日志，保持最小 IO 占用。如果需要查看日志，可使用 systemd/journal 或在配置中调整 loglevel。
 output_log="/dev/null"
 error_log="/dev/null"
 
@@ -858,180 +1091,6 @@ EOF2
     chmod +x /etc/init.d/xray
     rc-update add xray default >/dev/null 2>&1 || true
 }
-
-_xray_restart_timer_install_systemd() {
-    local time_str="$1"
-    cat > /etc/systemd/system/xray-restart.service <<EOF
-[Unit]
-Description=Xray Scheduled Restart
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/systemctl restart xray
-EOF
-
-    cat > /etc/systemd/system/xray-restart.timer <<EOF
-[Unit]
-Description=Xray Scheduled Restart Timer
-[Timer]
-OnCalendar=*-*-* ${time_str}:00
-Persistent=true
-[Install]
-WantedBy=timers.target
-EOF
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now xray-restart.timer >/dev/null 2>&1 || return 1
-    return 0
-}
-
-_xray_restart_timer_install_openrc() {
-    local time_str="$1"
-    cat > /usr/local/bin/xray-timer.sh <<'EOF'
-#!/bin/sh
-TARGET_TIME="$1"
-while true; do
-    if [ "$(date +%H:%M)" = "$TARGET_TIME" ]; then
-        rc-service xray restart >/dev/null 2>&1 || true
-        sleep 61
-    fi
-    sleep 30
-done
-EOF
-    chmod +x /usr/local/bin/xray-timer.sh
-
-    cat > /etc/init.d/xray-timer <<EOF
-#!/sbin/openrc-run
-description="Xray Scheduled Restart Timer"
-command="/usr/local/bin/xray-timer.sh"
-command_args="${time_str}"
-supervisor="supervise-daemon"
-respawn_delay=3
-respawn_max=0
-pidfile="/run/xray-timer.pid"
-
-depend() {
-    need net
-    after firewall
-}
-EOF
-    chmod +x /etc/init.d/xray-timer
-    rc-update add xray-timer default >/dev/null 2>&1 || true
-    rc-service xray-timer start >/dev/null 2>&1 || true
-}
-
-_xray_restart_timer_remove() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable --now xray-restart.timer >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/xray-restart.timer /etc/systemd/system/xray-restart.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-service xray-timer stop >/dev/null 2>&1 || true
-        rc-update del xray-timer default >/dev/null 2>&1 || true
-        rm -f /etc/init.d/xray-timer /usr/local/bin/xray-timer.sh
-    fi
-}
-
-_xray_restart_timer_apply_from_var() {
-    local t="$XRAY_RESTART_SCHEDULE"
-    if [ -z "$t" ] || [ "$t" = "off" ]; then
-        _xray_restart_timer_remove
-        return 0
-    fi
-    if ! echo "$t" | grep -Eq '^[0-2][0-9]:[0-5][0-9]$'; then
-        _error "XRAY_RESTART_SCHEDULE 格式错误，应为 HH:MM 或 off。"
-        return 1
-    fi
-    _xray_restart_timer_remove
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        _xray_restart_timer_install_systemd "$t" || return 1
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        _xray_restart_timer_install_openrc "$t" || return 1
-    else
-        _warn "当前 init 系统不支持自动创建定时重启任务。"
-    fi
-}
-
-_show_memory_runtime_status() {
-    local mem_limit effective_mb current_mb
-    mem_limit="$(_get_mem_limit)"
-    effective_mb="$(_get_effective_total_mem_mb 2>/dev/null || echo 0)"
-    current_mb="$(_get_cgroup_current_mb 2>/dev/null || echo unknown)"
-    echo ""
-    echo -e "${YELLOW}══════════ 当前内存治理状态 ══════════${NC}"
-    echo " 模式: ${XRAY_MEM_MODE}"
-    echo " 有效总内存: ${effective_mb}MB"
-    echo " 当前占用估算: ${current_mb}MB"
-    echo " GOMEMLIMIT: ${mem_limit}"
-    echo " 定时重启: ${XRAY_RESTART_SCHEDULE}"
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        [ -n "$XRAY_SYSTEMD_MEMORY_HIGH" ] && echo " MemoryHigh: ${XRAY_SYSTEMD_MEMORY_HIGH}"
-        [ -n "$XRAY_SYSTEMD_MEMORY_MAX" ] && echo " MemoryMax: ${XRAY_SYSTEMD_MEMORY_MAX}"
-        [ -n "$XRAY_SYSTEMD_MEMORY_SWAP_MAX" ] && echo " MemorySwapMax: ${XRAY_SYSTEMD_MEMORY_SWAP_MAX}"
-        [ -n "$XRAY_OOM_SCORE_ADJ" ] && echo " OOMScoreAdjust: ${XRAY_OOM_SCORE_ADJ}"
-    fi
-}
-
-_configure_memory_governance() {
-    local choice v
-    while true; do
-        clear
-        _show_memory_runtime_status
-        echo ""
-        _menu_item 1 "关闭 GOMEMLIMIT（off）"
-        _menu_item 2 "启用 singbox 兼容模式（90%）"
-        _menu_item 3 "启用 auto-safe 模式（更保守）"
-        _menu_item 4 "设置定时重启时间（HH:MM / off）"
-        _menu_item 5 "设置 systemd MemoryHigh"
-        _menu_item 6 "设置 systemd MemoryMax"
-        _menu_item 7 "设置 systemd MemorySwapMax"
-        _menu_item 8 "设置 OOMScoreAdjust"
-        _menu_exit 0 "返回"
-        echo ""
-        read -p "请选择 [0-8]: " choice
-        case "$choice" in
-            1) XRAY_MEM_MODE="off" ;;
-            2) XRAY_MEM_MODE="singbox-compat" ;;
-            3) XRAY_MEM_MODE="auto-safe" ;;
-            4)
-                read -p "请输入每天重启时间（HH:MM，输入 off 关闭）: " v
-                [ -z "$v" ] || XRAY_RESTART_SCHEDULE="$v"
-                ;;
-            5)
-                read -p "请输入 MemoryHigh（如 70% / 512M，留空清除）: " v
-                XRAY_SYSTEMD_MEMORY_HIGH="$v"
-                ;;
-            6)
-                read -p "请输入 MemoryMax（如 80% / 600M，留空清除）: " v
-                XRAY_SYSTEMD_MEMORY_MAX="$v"
-                ;;
-            7)
-                read -p "请输入 MemorySwapMax（如 0 / 1G，留空清除）: " v
-                XRAY_SYSTEMD_MEMORY_SWAP_MAX="$v"
-                ;;
-            8)
-                read -p "请输入 OOMScoreAdjust（-1000..1000，留空清除）: " v
-                XRAY_OOM_SCORE_ADJ="$v"
-                ;;
-            0)
-                break
-                ;;
-            *)
-                _error "无效输入。"
-                _pause
-                continue
-                ;;
-        esac
-        _save_memory_settings
-        if [ -f "$XRAY_BIN" ]; then
-            _create_xray_service >/dev/null 2>&1 || true
-            _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
-            _manage_xray_service restart >/dev/null 2>&1 || true
-        fi
-        _success "内存治理配置已保存并应用。"
-        _pause
-    done
-}
-
 
 _create_xray_service() {
     case "$INIT_SYSTEM" in
@@ -1083,11 +1142,9 @@ _manage_xray_service() {
 }
 
 _install_or_update_xray() {
+    _acquire_install_lock || return 1
     local is_first_install=false
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
-
-    _install_lock_acquire || return 1
-    _load_memory_settings
 
     if [ "$is_first_install" = true ]; then
         _info "Xray 核心未安装，正在执行首次安装..."
@@ -1097,33 +1154,60 @@ _install_or_update_xray() {
         _info "当前 Xray 版本: v${current_ver}，正在检查更新..."
     fi
 
-    if ! _xray_download_verify_install_linux; then
-        _install_lock_release
-        _error "Xray-core 安装/更新失败。"
-        return 1
+    command -v unzip >/dev/null 2>&1 || _pkg_install unzip
+
+    local arch=$(uname -m)
+    local xray_arch="64"
+    case "$arch" in
+        x86_64|amd64)  xray_arch="64" ;;
+        aarch64|arm64) xray_arch="arm64-v8a" ;;
+        armv7l)        xray_arch="arm32-v7a" ;;
+    esac
+
+    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local tmp_zip="${tmp_dir}/xray.zip"
+
+    _info "下载地址: ${download_url}"
+    if command -v curl >/dev/null 2>&1; then
+        curl -LfsS "$download_url" -o "$tmp_zip" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; _release_install_lock; return 1; }
+    else
+        wget -qO "$tmp_zip" "$download_url" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; _release_install_lock; return 1; }
     fi
+
+    unzip -qo "$tmp_zip" -d "$tmp_dir" || { _error "Xray 解压失败。"; rm -rf "$tmp_dir"; _release_install_lock; return 1; }
+
+    mv "${tmp_dir}/xray" "$XRAY_BIN"
+    chmod +x "$XRAY_BIN"
+    mkdir -p "$XRAY_DIR"
+    [ -f "${tmp_dir}/geoip.dat" ] && mv "${tmp_dir}/geoip.dat" "$XRAY_DIR/"
+    [ -f "${tmp_dir}/geosite.dat" ] && mv "${tmp_dir}/geosite.dat" "$XRAY_DIR/"
+    rm -rf "$tmp_dir"
 
     local version
     version=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
     _success "Xray-core v${version} 安装/更新成功。"
 
-    _init_xray_config
-
     if [ "$is_first_install" = true ]; then
+        _info "首次安装 Xray，正在初始化配置与服务..."
+        _init_xray_config
         _set_ip_preference ipv4 >/dev/null 2>&1 || true
-    fi
-
-    _create_xray_service
-    _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
-
-    if [ "$is_first_install" = true ]; then
+        _create_xray_service
         _manage_xray_service start
         _success "Xray 首次安装完成并已启动。"
     else
+        _init_xray_config
+        _create_xray_service
         _manage_xray_service restart
     fi
+    _release_install_lock
+}
 
-    _install_lock_release
+_install_or_update_dual_kernel() {
+    _install_or_update_xray || return 1
+    _install_or_update_singbox || return 1
+    _success "双内核安装/更新完成：Xray 负责节点协议，sing-box 负责内存治理模块。"
 }
 
 _view_xray_log() {
@@ -1364,8 +1448,6 @@ _remove_xray_runtime() {
         rc-update del xray default >/dev/null 2>&1 || true
         rm -f /etc/init.d/xray
     fi
-    _xray_restart_timer_remove >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/xray-restart.service /etc/systemd/system/xray-restart.timer
     rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
 }
@@ -1388,6 +1470,8 @@ _uninstall_script() {
     echo "即将删除以下内容："
     echo -e "  ${RED}-${NC} Xray 配置目录: ${XRAY_DIR}"
     echo -e "  ${RED}-${NC} Xray 二进制: ${XRAY_BIN}"
+    echo -e "  ${RED}-${NC} Sing-box 配置目录: ${SINGBOX_DIR}"
+    echo -e "  ${RED}-${NC} Sing-box 二进制: ${SINGBOX_BIN}"
     echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_INSTALL_PATH}"
     [ "$SCRIPT_ALIAS_PATH" != "$SCRIPT_INSTALL_PATH" ] && echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_ALIAS_PATH}"
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
@@ -1398,6 +1482,8 @@ _uninstall_script() {
 
     _info "正在停止并清理 Xray ..."
     _remove_xray_runtime
+    _info "正在停止并清理 Sing-box ..."
+    _remove_singbox_runtime
 
     _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
@@ -1423,8 +1509,20 @@ _show_status_header() {
             xray_status="${YELLOW}○ 未知${NC}"
         fi
     fi
-    local node_count
+    local node_count singbox_status singbox_ver
     node_count=$(jq '.inbounds | length' "$XRAY_CONFIG" 2>/dev/null || echo 0)
+    singbox_status="${RED}未安装${NC}"
+    singbox_ver=""
+    if [ -f "$SINGBOX_BIN" ]; then
+        singbox_ver=$($SINGBOX_BIN version 2>/dev/null | head -n1 | awk '{print $3}')
+        if [ "$INIT_SYSTEM" = "systemd" ]; then
+            systemctl is-active ${SINGBOX_SERVICE_NAME} >/dev/null 2>&1 && singbox_status="${GREEN}● 运行中${NC}" || singbox_status="${YELLOW}○ 已停止${NC}"
+        elif [ "$INIT_SYSTEM" = "openrc" ]; then
+            rc-service ${SINGBOX_SERVICE_NAME} status >/dev/null 2>&1 && singbox_status="${GREEN}● 运行中${NC}" || singbox_status="${YELLOW}○ 已停止${NC}"
+        else
+            singbox_status="${YELLOW}○ 未知${NC}"
+        fi
+    fi
     echo -e "=================================================="
     echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
     echo -e " 单协议: SS2022 + Reality"
@@ -1434,6 +1532,12 @@ _show_status_header() {
     else
         echo -e " Xray: ${xray_status} (${node_count}节点)"
     fi
+    if [ -n "$singbox_ver" ]; then
+        echo -e " Sing-box v${singbox_ver}: ${singbox_status}"
+    else
+        echo -e " Sing-box: ${singbox_status}"
+    fi
+    echo -e " 定时重启: ${XRAY_RESTART_SCHEDULE:-off}"
     echo -e "--------------------------------------------------"
 }
 
@@ -1444,41 +1548,57 @@ _xray_menu() {
         _show_status_header
         echo -e " ${CYAN}【服务控制】${NC}"
         _menu_item 1  "安装/更新 Xray 内核"
-        _menu_item 2  "启动 Xray"
-        _menu_item 3  "停止 Xray"
-        _menu_item 4  "重启 Xray"
-        _menu_item 5  "查看 Xray 状态"
-        _menu_item 6  "查看 Xray 日志"
+        _menu_item 2  "安装/更新 Sing-box 内核"
+        _menu_item 3  "一键安装/更新双内核"
+        _menu_item 4  "启动 Xray"
+        _menu_item 5  "停止 Xray"
+        _menu_item 6  "重启 Xray"
+        _menu_item 7  "查看 Xray 状态"
+        _menu_item 8  "查看 Xray 日志"
+        _menu_item 9  "启动 Sing-box"
+        _menu_item 10 "停止 Sing-box"
+        _menu_item 11 "重启 Sing-box"
+        _menu_item 12 "查看 Sing-box 状态"
+        _menu_item 13 "查看 Sing-box 日志"
+        _menu_item 14 "Sing-box 内存回收设置"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        _menu_item 7  "添加 SS2022+Reality 节点"
-        _menu_item 8  "查看所有节点"
-        _menu_item 9  "删除节点"
-        _menu_item 10 "修改节点端口"
-        _menu_item 11 "更新脚本"
-        _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
-        _menu_item 13 "内核内存治理 / 定时重启"
+        _menu_item 21 "添加 SS2022+Reality 节点"
+        _menu_item 22 "查看所有节点"
+        _menu_item 23 "删除节点"
+        _menu_item 24 "修改节点端口"
+        _menu_item 25 "更新脚本"
+        _menu_item 26 "设置网络优先级 (IPv4/IPv6)"
         echo ""
         _menu_danger 88 "卸载 Xray"
+        _menu_danger 89 "卸载 Sing-box"
         _menu_danger 99 "卸载脚本"
         _menu_exit 0 "退出脚本"
         echo -e "=================================================="
         read -p "请选择 [0-99]: " choice
         case "$choice" in
             1) _install_or_update_xray; _pause ;;
-            2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
-            3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
-            4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            5) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
-            6) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
-            7) _init_xray_config; _add_ss2022_reality; _pause ;;
-            8) _view_xray_nodes; _pause ;;
-            9) _delete_xray_node; _pause ;;
-            10) _modify_xray_port; _pause ;;
-            11) _update_script_self; _pause; exit 0 ;;
-            12) _choose_ip_preference ;;
-            13) _configure_memory_governance ;;
+            2) _install_or_update_singbox; _pause ;;
+            3) _install_or_update_dual_kernel; _pause ;;
+            4) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
+            5) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
+            6) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
+            7) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
+            8) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
+            9) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service start; _pause ;;
+            10) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service stop; _pause ;;
+            11) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service restart; _pause ;;
+            12) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service status; _pause ;;
+            13) [ -f "$SINGBOX_BIN" ] && _view_singbox_log ;;
+            14) _configure_singbox_memory_reclaim ;;
+            21) _init_xray_config; _add_ss2022_reality; _pause ;;
+            22) _view_xray_nodes; _pause ;;
+            23) _delete_xray_node; _pause ;;
+            24) _modify_xray_port; _pause ;;
+            25) _update_script_self; _pause; exit 0 ;;
+            26) _choose_ip_preference ;;
             88) _uninstall_xray; _pause ;;
+            89) _remove_singbox_runtime; _success "Sing-box 已卸载。"; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
             *) _error "无效输入。"; _pause ;;
@@ -1496,11 +1616,15 @@ _main() {
     _check_root
     _detect_init_system
     _ensure_deps
-    _load_memory_settings
     _install_script_shortcut
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
+    fi
+    if [ -f "$SINGBOX_BIN" ]; then
+        _initialize_singbox_runtime_files
+        _load_singbox_restart_schedule
+        _create_singbox_service >/dev/null 2>&1 || true
         _xray_restart_timer_apply_from_var >/dev/null 2>&1 || true
     fi
     _xray_menu
