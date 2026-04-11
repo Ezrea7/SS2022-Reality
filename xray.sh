@@ -2,10 +2,9 @@
 
 # ============================================================
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
-#      集成 Sing-box 内存回收机制
 # ============================================================
 
-SCRIPT_VERSION="3.5.3"
+SCRIPT_VERSION="3.5.1"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -19,11 +18,6 @@ XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
-
-# Sing-box 相关路径配置（用于内存回收辅助）
-SINGBOX_BIN="/usr/local/bin/sing-box"
-SINGBOX_DIR="/usr/local/etc/sing-box"
-SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
 
 # IP preference configuration file used to determine whether IPv4 or IPv6 should
 # be attempted first when detecting the server's public address. Possible
@@ -283,321 +277,7 @@ _set_ip_preference() {
 # restore the default IPv6 priority. The function creates a backup of the
 # original gai.conf on first invocation. See ArchWiki and other references
 # explaining that uncommenting or adding the line
-# 'precedence ::ffff:0:0/96 100' forces IPv4 priority【484791851435576†L894-L902】,
-# while removing or commenting it reverts to IPv6 priority【873299726000284†L50-L58】.
-_apply_system_ip_preference() {
-    local pref="$1"
-    local gai_conf="/etc/gai.conf"
-    # Ensure the configuration file exists
-    [ -f "$gai_conf" ] || touch "$gai_conf"
-    # Create a single backup if one does not yet exist
-    if [ ! -f "${gai_conf}.bak" ]; then
-        cp -a "$gai_conf" "${gai_conf}.bak" 2>/dev/null || true
-    fi
-    # Comment out any existing uncommented precedence rule for IPv4-mapped addresses
-    # Comment out precedence lines for IPv4-mapped addresses
-    sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
-    if [ "$pref" = "ipv4" ]; then
-        # Append the IPv4 precedence rule if it is not already present
-        if ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' "$gai_conf"; then
-            echo 'precedence ::ffff:0:0/96 100' >> "$gai_conf"
-        fi
-    fi
-}
-
-# Interactive menu allowing the user to choose between IPv4- or IPv6-first
-# behaviour for public IP detection. Displays the current preference and
-# shows the current detected IPv4 and IPv6 public addresses if available.
-_choose_ip_preference() {
-    local current
-    current=$(_get_ip_preference)
-    # Detect current IPv4 and IPv6 addresses separately.
-    local ip4="" ip6=""
-    # Attempt detection using curl
-    if command -v curl >/dev/null 2>&1; then
-        # IPv4: try multiple services, fall back to api.ipify.org
-        ip4=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
-        # IPv6: try multiple services, fall back to api6.ipify.org
-        ip6=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null || true)
-    fi
-    # Attempt detection using wget if either is missing
-    if command -v wget >/dev/null 2>&1; then
-        if [ -z "$ip4" ]; then
-            ip4=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null || true)
-        fi
-        if [ -z "$ip6" ]; then
-            ip6=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null || true)
-        fi
-    fi
-    echo ""
-    # Display the current preference using proper casing (IPv4/IPv6)
-    local display_pref
-    if [ "$current" = "ipv6" ]; then
-        display_pref="IPv6"
-    else
-        display_pref="IPv4"
-    fi
-    echo -e "${CYAN}当前网络优先级设置: ${NC}${GREEN}${display_pref} 优先${NC}"
-    echo ""
-    # Display detected IP addresses; show '无' if not found
-    echo -e "检测到 IPv4 地址: ${YELLOW}${ip4:-无}${NC}"
-    echo -e "检测到 IPv6 地址: ${YELLOW}${ip6:-无}${NC}"
-    echo ""
-    echo "请选择网络优先级:"
-    echo -e "  ${GREEN}[1]${NC} IPv4 优先"
-    echo -e "  ${GREEN}[2]${NC} IPv6 优先"
-    echo -e "  ${YELLOW}[0]${NC} 返回上一级"
-    read -p "请选择 [0-2]: " choice
-    case "$choice" in
-        1)
-            if _set_ip_preference ipv4; then
-                _success "已设置 IPv4 优先。"
-            else
-                _error "设置 IPv4 优先失败。"
-            fi
-            ;;
-        2)
-            if _set_ip_preference ipv6; then
-                _success "已设置 IPv6 优先。"
-            else
-                _error "设置 IPv6 优先失败。"
-            fi
-            ;;
-        0)
-            return 0
-            ;;
-        *)
-            _error "无效输入。"
-            ;;
-    esac
-    _pause
-}
-
-
-
-
-_get_meminfo_total_mb() {
-    local total_mem_mb=0
-    total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        if command -v free >/dev/null 2>&1; then
-            total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-        fi
-    fi
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        total_mem_mb=128
-    fi
-    echo "$total_mem_mb"
-}
-
-_is_likely_container() {
-    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -cq >/dev/null 2>&1; then
-        return 0
-    fi
-    grep -qaE '(lxc|docker|container|kubepods|podman)' /proc/1/environ /proc/1/cgroup 2>/dev/null && return 0
-    return 1
-}
-
-_read_first_cgroup_value() {
-    local mode="$1" path raw bytes mb
-    shift
-    for path in "$@"; do
-        [ -n "$path" ] || continue
-        [ -r "$path" ] || continue
-        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
-        [ -n "$raw" ] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" = "max" ]; then
-            continue
-        fi
-        [[ "$raw" =~ ^[0-9]+$ ]] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
-            continue
-        fi
-        bytes=$raw
-        mb=$((bytes / 1024 / 1024))
-        [ "$mb" -ge 0 ] || continue
-        if [ "$mode" = "limit" ] && [ "$mb" -le 0 ]; then
-            continue
-        fi
-        echo "$mb"
-        return 0
-    done
-    return 1
-}
-
-_get_cgroup_limit_mb() {
-    local cg2_rel cg1_rel mp paths=()
-
-    paths+=(/sys/fs/cgroup/memory.max)
-    paths+=(/sys/fs/cgroup/memory/memory.limit_in_bytes)
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.max")
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes")
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.max")
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.max")
-    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.limit_in_bytes")
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.limit_in_bytes")
-    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    _read_first_cgroup_value limit $(printf '%s
-' "${paths[@]}" | awk '!seen[$0]++')
-}
-
-_get_effective_total_mem_mb() {
-    local meminfo_mb cgroup_mb
-    meminfo_mb=$(_get_meminfo_total_mb)
-    cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-
-    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ]; then
-        echo "$cgroup_mb"
-        return 0
-    fi
-
-    if _is_likely_container && [ "$meminfo_mb" -gt 512 ]; then
-        _warn "未可靠识别到容器内存限制，当前 /proc/meminfo 显示 ${meminfo_mb}MB；为避免误判宿主机内存，保守回退到 512MB。"
-        echo 512
-        return 0
-    fi
-
-    echo "$meminfo_mb"
-}
-
-_get_cgroup_current_mb() {
-    local cg2_rel cg1_rel mp paths=() current_est
-
-    paths+=(/sys/fs/cgroup/memory.current)
-    paths+=(/sys/fs/cgroup/memory/memory.usage_in_bytes)
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.current")
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes")
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths Prefer IPv4 first; use api.ipify.org for IPv4 fallback
-            ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-                 || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                 || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
-            # If IPv4 detection failed, fall back to IPv6 detection
-            [ -z "$ip" ] && ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-                                  || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                                  || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
-        fi
-    fi
-    # Fallback to wget if curl didn't yield a result
-    if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
-        if [ "$pref" = "ipv6" ]; then
-            ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
-        else
-            ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
-        fi
-    fi
-    server_ip="$ip"
-    echo "$ip"
-}
-
-_atomic_modify_json() {
-    local file="$1" filter="$2"
-    local tmp="${file}.tmp.$$"
-    if jq "$filter" "$file" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$file"
-    else
-        rm -f "$tmp"
-        _error "JSON 修改失败。"
-        return 1
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# IP preference helpers
-#
-# The script supports selecting a preferred IP address family (IPv4 or IPv6)
-# when performing network operations such as public IP discovery. The chosen
-# preference is persisted in a simple configuration file within the Xray
-# configuration directory. If no preference is set, IPv4 is assumed by
-# default. These helper functions handle reading and writing this preference
-# as well as presenting a user-facing menu for changing it.
-
-# Return the currently configured IP family preference. If the preference
-# file does not exist or contains an unexpected value, "ipv4" is returned.
-_get_ip_preference() {
-    local pref=""
-    if [ -f "$IP_PREF_FILE" ]; then
-        pref=$(tr -d '\n\r' < "$IP_PREF_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
-    fi
-    case "$pref" in
-        ipv4|ipv6) echo "$pref" ;;
-        *) echo "ipv4" ;;
-    esac
-}
-
-# Persist the given IP family preference to disk. Accepts only "ipv4" or
-# "ipv6" as valid arguments. Returns 0 on success, 1 on failure.
-_set_ip_preference() {
-    local pref="$1"
-    case "$pref" in
-        ipv4|ipv6)
-            mkdir -p "$XRAY_DIR" 2>/dev/null || true
-            echo "$pref" > "$IP_PREF_FILE" 2>/dev/null || return 1
-            # Apply system-wide gai.conf preference and clear cached IP.
-            _apply_system_ip_preference "$pref"
-            unset server_ip
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-
-# Modify the system address selection policy according to the given IP preference.
-# For IPv4, this function ensures that /etc/gai.conf contains a precedence rule
-# preferring IPv4-mapped addresses. For IPv6, it comments out that rule to
-# restore the default IPv6 priority. The function creates a backup of the
-# original gai.conf on first invocation. See ArchWiki and other references
-# explaining that uncommenting or adding the line
-# 'precedence ::ffff:0:0/96 100' forces IPv4 priority【484791851435576†L894-L902】,
+# 'precedence ::ffff:0:0/96 100' forces IPv4 preference【484791851435576†L894-L902】,
 # while removing or commenting it reverts to IPv6 priority【873299726000284†L50-L58】.
 _apply_system_ip_preference() {
     local pref="$1"
@@ -842,681 +522,22 @@ _get_cgroup_current_mb() {
     return 1
 }
 
-# ==============================================================================
-# Sing-box 内存回收机制迁移（从 singbox.sh 迁移）
-# ==============================================================================
-
-# 内存限额计算（Sing-box 机制：总内存的 90%，最低 10MB）
-# 用于设置 GOMEMLIMIT 环境变量，控制 Go 程序（包括 Xray）的内存回收
-_get_mem_limit() {
-    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
-    local limit=$((total_mem_mb * 90 / 100))
-    [ "$limit" -lt 10 ] && limit=10
-    echo "$limit"
-}
-
-# 安装 Sing-box 内核（从 singbox.sh 迁移）
-_install_sing_box() {
-    _info "正在安装最新稳定版 sing-box..."
-    local arch=$(uname -m)
-    local arch_tag
-    case "$arch" in
-        x86_64|amd64) arch_tag='amd64' ;;
-        aarch64|arm64) arch_tag='arm64' ;;
-        armv7l) arch_tag='armv7' ;;
-        *) _error "不支持的架构：$arch"; exit 1 ;;
-    esac
-    
-    # 检测 C 库类型：Alpine 等系统使用 musl，需要下载对应版本
-    local libc_suffix=""
-    if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then
-        _info "检测到 musl libc (Alpine 等系统)，将下载 musl 版本..."
-        libc_suffix="-musl"
-    fi
-    
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local search_pattern="linux-${arch_tag}${libc_suffix}.tar.gz"
-    local release_info=$(curl -s "$api_url")
-    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"${search_pattern}\")) | .browser_download_url" | head -1)
-    local checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith("checksums.txt")) | .browser_download_url' | head -1)
-    
-    if [ -z "$download_url" ]; then _error "无法获取 sing-box 下载链接 (搜索: ${search_pattern})。"; exit 1; fi
-    
-    wget -qO sing-box.tar.gz "$download_url" || { _error "下载失败!"; exit 1; }
-    
-    # SHA256 完整性校验
-    if [ -n "$checksum_url" ]; then
-        _info "正在进行 SHA256 完整性校验..."
-        local checksums=$(wget -qO- "$checksum_url" 2>/dev/null)
-        if [ -n "$checksums" ]; then
-            local dl_filename=$(basename "$download_url")
-            local expected_hash=$(echo "$checksums" | grep "$dl_filename" | awk '{print $1}')
-            if [ -n "$expected_hash" ]; then
-                local actual_hash=$(sha256sum sing-box.tar.gz | awk '{print $1}')
-                if [ "$expected_hash" != "$actual_hash" ]; then
-                    _error "SHA256 校验失败！文件可能已被篡改。"
-                    _error "预期: ${expected_hash}"
-                    _error "实际: ${actual_hash}"
-                    rm -f sing-box.tar.gz
-                    exit 1
-                fi
-                _success "SHA256 校验通过。"
-            else
-                _warn "校验文件中未找到匹配条目，跳过校验。"
-            fi
-        else
-            _warn "校验文件下载失败，跳过完整性校验。"
-        fi
-    else
-        _warn "未找到 SHA256 校验文件，跳过完整性校验。"
-    fi
-    
-    local temp_dir=$(mktemp -d)
-    tar -xzf sing-box.tar.gz -C "$temp_dir"
-    mv "$temp_dir/sing-box-"*"/sing-box" ${SINGBOX_BIN}
-    rm -rf sing-box.tar.gz "$temp_dir"
-    chmod +x ${SINGBOX_BIN}
-    
-    _success "sing-box 安装成功, 版本: $(${SINGBOX_BIN} version)"
-}
-
-# 安装/更新 Sing-box 并初始化（集成到服务控制）
-_install_or_update_singbox() {
-    if [ -f "${SINGBOX_BIN}" ]; then
-        local current_ver=$(${SINGBOX_BIN} version 2>/dev/null | head -n1 | awk '{print $3}')
-        _info "当前 Sing-box 版本: v${current_ver}，正在检查更新..."
-    else
-        _info "Sing-box 核心未安装，正在执行首次安装..."
-        # 首次安装时创建目录
-        mkdir -p ${SINGBOX_DIR}
-    fi
-    
-    _install_sing_box
-    
-    if [ $? -eq 0 ]; then
-        _success "Sing-box 安装/更新成功！"
-        _info "Sing-box 将辅助 Xray 进行内存回收管理（通过 GOMEMLIMIT 机制）"
-        # 创建基础配置目录（即使不使用代理功能也需要）
-        [ ! -f "${SINGBOX_CONFIG}" ] && echo '{"inbounds":[],"outbounds":[],"route":{"rules":[]}}' > "${SINGBOX_CONFIG}"
-    else
-        _error "Sing-box 核心安装/更新失败。"
-    fi
-}
-
-_check_port_occupied() {
-    local port="$1"
-    if command -v ss >/dev/null 2>&1; then
-        ss -lnt 2>/dev/null | grep -q ":${port} " && return 0
-        ss -lnu 2>/dev/null | grep -q ":${port} " && return 0
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -lnt 2>/dev/null | grep -q ":${port} " && return 0
-        netstat -lnu 2>/dev/null | grep -q ":${port} " && return 0
-    fi
-    return 1
-}
-
-_check_xray_port_conflict() {
-    local port="$1"
-    if _check_port_occupied "$port"; then
-        _error "端口 ${port} 已被系统占用。"
-        return 0
-    fi
-    if [ -f "$XRAY_CONFIG" ] && jq -e ".inbounds[] | select(.port == $port)" "$XRAY_CONFIG" >/dev/null 2>&1; then
-        _error "端口 ${port} 已被 Xray 节点使用。"
-        return 0
-    fi
-    return 1
-}
-
-_input_port() {
-    local port=""
-    while true; do
-        read -p "请输入监听端口: " port
-        [[ -z "$port" ]] && _error "端口不能为空。" && continue
-        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-            _error "无效端口号。"
-            continue
-        fi
-        _check_xray_port_conflict "$port" && continue
-        break
-    done
-    echo "$port"
-}
-
-_init_xray_config() {
-    mkdir -p "$XRAY_DIR"
-    touch "$XRAY_LOG" 2>/dev/null || true
-    if [ ! -s "$XRAY_CONFIG" ]; then
-        cat > "$XRAY_CONFIG" <<'JSON'
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ],
-  "routing": {
-    "rules": []
-  }
-}
-JSON
-        _success "Xray 配置文件已初始化。"
-    fi
-    [ -s "$XRAY_METADATA" ] || echo '{}' > "$XRAY_METADATA"
-}
-
-_create_xray_systemd_service() {
-    # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
-    # 使用从 Sing-box 迁移过来的内存回收机制（_get_mem_limit）
-    local mem_limit env_line
-    mem_limit=$(_get_mem_limit)
-    env_line=""
-    # 如果 mem_limit 非 0，则设置 Environment 指令
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        env_line="Environment=\"GOMEMLIMIT=${mem_limit}MiB\""
-        _info "已启用 Sing-box 内存回收机制：GOMEMLIMIT=${mem_limit}MiB"
-    fi
-    # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
-    cat > /etc/systemd/system/xray.service <<EOF2
-[Unit]
-Description=Xray Service
-After=network.target nss-lookup.target
-
-[Service]
-Type=simple
-${env_line}
-ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
-Restart=on-failure
-RestartSec=3s
-LimitNOFILE=65535
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable xray >/dev/null 2>&1 || true
-}
-
-_create_xray_openrc_service() {
-    # 创建 openrc 服务脚本。根据当前环境计算 GOMEMLIMIT，并在启动命令中导出该变量。
-    # 使用从 Sing-box 迁移过来的内存回收机制
-    local mem_limit cmd_args
-    mem_limit=$(_get_mem_limit)
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-        _info "已启用 Sing-box 内存回收机制：GOMEMLIMIT=${mem_limit}MiB"
-    else
-        cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-    fi
-    cat > /etc/init.d/xray <<EOF2
-#!/sbin/openrc-run
-description="Xray Service"
-command="/bin/sh"
-command_args="${cmd_args}"
-supervisor="supervise-daemon"
-respawn_delay=3
-respawn_max=0
-pidfile="${XRAY_PID_FILE}"
-# 不保存运行日志，保持最小 IO 占用。如果需要查看日志，可使用 systemd/journal 或在配置中调整 loglevel。
-output_log="/dev/null"
-error_log="/dev/null"
-
-depend() {
-    need net
-    after firewall
-}
-EOF2
-    chmod +x /etc/init.d/xray
-    rc-update add xray default >/dev/null 2>&1 || true
-}
-
-_create_x Prefer IPv4 first; use api.ipify.org for IPv4 fallback
-            ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-                 || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                 || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
-            # If IPv4 detection failed, fall back to IPv6 detection
-            [ -z "$ip" ] && ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-                                  || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                                  || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
-        fi
-    fi
-    # Fallback to wget if curl didn't yield a result
-    if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
-        if [ "$pref" = "ipv6" ]; then
-            ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
-        else
-            ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
-        fi
-    fi
-    server_ip="$ip"
-    echo "$ip"
-}
-
-_atomic_modify_json() {
-    local file="$1" filter="$2"
-    local tmp="${file}.tmp.$$"
-    if jq "$filter" "$file" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$file"
-    else
-        rm -f "$tmp"
-        _error "JSON 修改失败。"
-        return 1
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# IP preference helpers
+# 智能 GOMEMLIMIT 计算：
+# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
+# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
+# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
+# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
+# 内存限制计算函数
 #
-# The script supports selecting a preferred IP address family (IPv4 or IPv6)
-# when performing network operations such as public IP discovery. The chosen
-# preference is persisted in a simple configuration file within the Xray
-# configuration directory. If no preference is set, IPv4 is assumed by
-# default. These helper functions handle reading and writing this preference
-# as well as presenting a user-facing menu for changing it.
-
-# Return the currently configured IP family preference. If the preference
-# file does not exist or contains an unexpected value, "ipv4" is returned.
-_get_ip_preference() {
-    local pref=""
-    if [ -f "$IP_PREF_FILE" ]; then
-        pref=$(tr -d '\n\r' < "$IP_PREF_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
-    fi
-    case "$pref" in
-        ipv4|ipv6) echo "$pref" ;;
-        *) echo "ipv4" ;;
-    esac
-}
-
-# Persist the given IP family preference to disk. Accepts only "ipv4" or
-# "ipv6" as valid arguments. Returns 0 on success, 1 on failure.
-_set_ip_preference() {
-    local pref="$1"
-    case "$pref" in
-        ipv4|ipv6)
-            mkdir -p "$XRAY_DIR" 2>/dev/null || true
-            echo "$pref" > "$IP_PREF_FILE" 2>/dev/null || return 1
-            # Apply system-wide gai.conf preference and clear cached IP.
-            _apply_system_ip_preference "$pref"
-            unset server_ip
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-
-# Modify the system address selection policy according to the given IP preference.
-# For IPv4, this function ensures that /etc/gai.conf contains a precedence rule
-# preferring IPv4-mapped addresses. For IPv6, it comments out that rule to
-# restore the default IPv6 priority. The function creates a backup of the
-# original gai.conf on first invocation. See ArchWiki and other references
-# explaining that uncommenting or adding the line
-# 'precedence ::ffff:0:0/96 100' forces IPv4 priority【484791851435576†L894-L902】,
-# while removing or commenting it reverts to IPv6 priority【873299726000284†L50-L58】.
-_apply_system_ip_preference() {
-    local pref="$1"
-    local gai_conf="/etc/gai.conf"
-    # Ensure the configuration file exists
-    [ -f "$gai_conf" ] || touch "$gai_conf"
-    # Create a single backup if one does not yet exist
-    if [ ! -f "${gai_conf}.bak" ]; then
-        cp -a "$gai_conf" "${gai_conf}.bak" 2>/dev/null || true
-    fi
-    # Comment out any existing uncommented precedence rule for IPv4-mapped addresses
-    # Comment out precedence lines for IPv4-mapped addresses
-    sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
-    if [ "$pref" = "ipv4" ]; then
-        # Append the IPv4 precedence rule if it is not already present
-        if ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' "$gai_conf"; then
-            echo 'precedence ::ffff:0:0/96 100' >> "$gai_conf"
-        fi
-    fi
-}
-
-# Interactive menu allowing the user to choose between IPv4- or IPv6-first
-# behaviour for public IP detection. Displays the current preference and
-# shows the current detected IPv4 and IPv6 public addresses if available.
-_choose_ip_preference() {
-    local current
-    current=$(_get_ip_preference)
-    # Detect current IPv4 and IPv6 addresses separately.
-    local ip4="" ip6=""
-    # Attempt detection using curl
-    if command -v curl >/dev/null 2>&1; then
-        # IPv4: try multiple services, fall back to api.ipify.org
-        ip4=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
-        # IPv6: try multiple services, fall back to api6.ipify.org
-        ip6=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null || true)
-    fi
-    # Attempt detection using wget if either is missing
-    if command -v wget >/dev/null 2>&1; then
-        if [ -z "$ip4" ]; then
-            ip4=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null || true)
-        fi
-        if [ -z "$ip6" ]; then
-            ip6=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null || true)
-        fi
-    fi
-    echo ""
-    # Display the current preference using proper casing (IPv4/IPv6)
-    local display_pref
-    if [ "$current" = "ipv6" ]; then
-        display_pref="IPv6"
-    else
-        display_pref="IPv4"
-    fi
-    echo -e "${CYAN}当前网络优先级设置: ${NC}${GREEN}${display_pref} 优先${NC}"
-    echo ""
-    # Display detected IP addresses; show '无' if not found
-    echo -e "检测到 IPv4 地址: ${YELLOW}${ip4:-无}${NC}"
-    echo -e "检测到 IPv6 地址: ${YELLOW}${ip6:-无}${NC}"
-    echo ""
-    echo "请选择网络优先级:"
-    echo -e "  ${GREEN}[1]${NC} IPv4 优先"
-    echo -e "  ${GREEN}[2]${NC} IPv6 优先"
-    echo -e "  ${YELLOW}[0]${NC} 返回上一级"
-    read -p "请选择 [0-2]: " choice
-    case "$choice" in
-        1)
-            if _set_ip_preference ipv4; then
-                _success "已设置 IPv4 优先。"
-            else
-                _error "设置 IPv4 优先失败。"
-            fi
-            ;;
-        2)
-            if _set_ip_preference ipv6; then
-                _success "已设置 IPv6 优先。"
-            else
-                _error "设置 IPv6 优先失败。"
-            fi
-            ;;
-        0)
-            return 0
-            ;;
-        *)
-            _error "无效输入。"
-            ;;
-    esac
-    _pause
-}
-
-
-
-
-_get_meminfo_total_mb() {
-    local total_mem_mb=0
-    total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        if command -v free >/dev/null 2>&1; then
-            total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-        fi
-    fi
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        total_mem_mb=128
-    fi
-    echo "$total_mem_mb"
-}
-
-_is_likely_container() {
-    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -cq >/dev/null 2>&1; then
-        return 0
-    fi
-    grep -qaE '(lxc|docker|container|kubepods|podman)' /proc/1/environ /proc/1/cgroup 2>/dev/null && return 0
-    return 1
-}
-
-_read_first_cgroup_value() {
-    local mode="$1" path raw bytes mb
-    shift
-    for path in "$@"; do
-        [ -n "$path" ] || continue
-        [ -r "$path" ] || continue
-        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
-        [ -n "$raw" ] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" = "max" ]; then
-            continue
-        fi
-        [[ "$raw" =~ ^[0-9]+$ ]] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
-            continue
-        fi
-        bytes=$raw
-        mb=$((bytes / 1024 / 1024))
-        [ "$mb" -ge 0 ] || continue
-        if [ "$mode" = "limit" ] && [ "$mb" -le 0 ]; then
-            continue
-        fi
-        echo "$mb"
-        return 0
-    done
-    return 1
-}
-
-_get_cgroup_limit_mb() {
-    local cg2_rel cg1_rel mp paths=()
-
-    paths+=(/sys/fs/cgroup/memory.max)
-    paths+=(/sys/fs/cgroup/memory/memory.limit_in_bytes)
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.max")
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes")
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.max")
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.max")
-    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.limit_in_bytes")
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.limit_in_bytes")
-    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    _read_first_cgroup_value limit $(printf '%s
-' "${paths[@]}" | awk '!seen[$0]++')
-}
-
-_get_effective_total_mem_mb() {
-    local meminfo_mb cgroup_mb
-    meminfo_mb=$(_get_meminfo_total_mb)
-    cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-
-    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ]; then
-        echo "$cgroup_mb"
-        return 0
-    fi
-
-    if _is_likely_container && [ "$meminfo_mb" -gt 512 ]; then
-        _warn "未可靠识别到容器内存限制，当前 /proc/meminfo 显示 ${meminfo_mb}MB；为避免误判宿主机内存，保守回退到 512MB。"
-        echo 512
-        return 0
-    fi
-
-    echo "$meminfo_mb"
-}
-
-_get_cgroup_current_mb() {
-    local cg2_rel cg1_rel mp paths=() current_est
-
-    paths+=(/sys/fs/cgroup/memory.current)
-    paths+=(/sys/fs/cgroup/memory/memory.usage_in_bytes)
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.current")
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes")
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.current")
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.current")
-    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.usage_in_bytes")
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.usage_in_bytes")
-    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    if _read_first_cgroup_value current $(printf '%s
-' "${paths[@]}" | awk '!seen[$0]++'); then
-        return 0
-    fi
-
-    current_est=$(awk '/MemTotal:/{t=$2}/MemAvailable:/{a=$2} END{if(t>0 && a>=0 && t>=a) print int((t-a)/1024)}' /proc/meminfo 2>/dev/null)
-    if [[ "$current_est" =~ ^[0-9]+$ ]] && [ "$current_est" -ge 0 ]; then
-        echo "$current_est"
-        return 0
-    fi
-
-    return 1
-}
-
-# ==============================================================================
-# Sing-box 内存回收机制迁移（从 singbox.sh 迁移）
-# ==============================================================================
-
-# 内存限额计算（Sing-box 机制：总内存的 90%，最低 10MB）
-# 用于设置 GOMEMLIMIT 环境变量，控制 Go 程序（包括 Xray）的内存回收
+# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
+# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
+# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
 _get_mem_limit() {
-    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
-    local limit=$((total_mem_mb * 90 / 100))
-    [ "$limit" -lt 10 ] && limit=10
-    echo "$limit"
+    echo 0
+    return 0
 }
 
-# 安装 Sing-box 内核（从 singbox.sh 迁移）
-_install_sing_box() {
-    _info "正在安装最新稳定版 sing-box..."
-    local arch=$(uname -m)
-    local arch_tag
-    case "$arch" in
-        x86_64|amd64) arch_tag='amd64' ;;
-        aarch64|arm64) arch_tag='arm64' ;;
-        armv7l) arch_tag='armv7' ;;
-        *) _error "不支持的架构：$arch"; exit 1 ;;
-    esac
-    
-    # 检测 C 库类型：Alpine 等系统使用 musl，需要下载对应版本
-    local libc_suffix=""
-    if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then
-        _info "检测到 musl libc (Alpine 等系统)，将下载 musl 版本..."
-        libc_suffix="-musl"
-    fi
-    
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local search_pattern="linux-${arch_tag}${libc_suffix}.tar.gz"
-    local release_info=$(curl -s "$api_url")
-    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"${search_pattern}\")) | .browser_download_url" | head -1)
-    local checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith("checksums.txt")) | .browser_download_url' | head -1)
-    
-    if [ -z "$download_url" ]; then _error "无法获取 sing-box 下载链接 (搜索: ${search_pattern})。"; exit 1; fi
-    
-    wget -qO sing-box.tar.gz "$download_url" || { _error "下载失败!"; exit 1; }
-    
-    # SHA256 完整性校验
-    if [ -n "$checksum_url" ]; then
-        _info "正在进行 SHA256 完整性校验..."
-        local checksums=$(wget -qO- "$checksum_url" 2>/dev/null)
-        if [ -n "$checksums" ]; then
-            local dl_filename=$(basename "$download_url")
-            local expected_hash=$(echo "$checksums" | grep "$dl_filename" | awk '{print $1}')
-            if [ -n "$expected_hash" ]; then
-                local actual_hash=$(sha256sum sing-box.tar.gz | awk '{print $1}')
-                if [ "$expected_hash" != "$actual_hash" ]; then
-                    _error "SHA256 校验失败！文件可能已被篡改。"
-                    _error "预期: ${expected_hash}"
-                    _error "实际: ${actual_hash}"
-                    rm -f sing-box.tar.gz
-                    exit 1
-                fi
-                _success "SHA256 校验通过。"
-            else
-                _warn "校验文件中未找到匹配条目，跳过校验。"
-            fi
-        else
-            _warn "校验文件下载失败，跳过完整性校验。"
-        fi
-    else
-        _warn "未找到 SHA256 校验文件，跳过完整性校验。"
-    fi
-    
-    local temp_dir=$(mktemp -d)
-    tar -xzf sing-box.tar.gz -C "$temp_dir"
-    mv "$temp_dir/sing-box-"*"/sing-box" ${SINGBOX_BIN}
-    rm -rf sing-box.tar.gz "$temp_dir"
-    chmod +x ${SINGBOX_BIN}
-    
-    _success "sing-box 安装成功, 版本: $(${SINGBOX_BIN} version)"
-}
-
-# 安装/更新 Sing-box 并初始化（集成到服务控制）
-_install_or_update_singbox() {
-    if [ -f "${SINGBOX_BIN}" ]; then
-        local current_ver=$(${SINGBOX_BIN} version 2>/dev/null | head -n1 | awk '{print $3}')
-        _info "当前 Sing-box 版本: v${current_ver}，正在检查更新..."
-    else
-        _info "Sing-box 核心未安装，正在执行首次安装..."
-        # 首次安装时创建目录
-        mkdir -p ${SINGBOX_DIR}
-    fi
-    
-    _install_sing_box
-    
-    if [ $? -eq 0 ]; then
-        _success "Sing-box 安装/更新成功！"
-        _info "Sing-box 将辅助 Xray 进行内存回收管理（通过 GOMEMLIMIT 机制）"
-        # 创建基础配置目录（即使不使用代理功能也需要）
-        [ ! -f "${SINGBOX_CONFIG}" ] && echo '{"inbounds":[],"outbounds":[],"route":{"rules":[]}}' > "${SINGBOX_CONFIG}"
-    else
-        _error "Sing-box 核心安装/更新失败。"
-    fi
-}
+# 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
 
 _check_port_occupied() {
     local port="$1"
@@ -1590,14 +611,12 @@ JSON
 
 _create_xray_systemd_service() {
     # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
-    # 使用从 Sing-box 迁移过来的内存回收机制（_get_mem_limit）
     local mem_limit env_line
     mem_limit=$(_get_mem_limit)
     env_line=""
     # 如果 mem_limit 非 0，则设置 Environment 指令
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        env_line="Environment=\"GOMEMLIMIT=${mem_limit}MiB\""
-        _info "已启用 Sing-box 内存回收机制：GOMEMLIMIT=${mem_limit}MiB"
+        env_line="Environment=\"GOMEMLIMIT=${mem_limit}\""
     fi
     # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
     cat > /etc/systemd/system/xray.service <<EOF2
@@ -1622,13 +641,13 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    # 创建 openrc 服务脚本。根据当前环境计算 GOMEMLIMIT，并在启动命令中导出该变量。
-    # 使用从 Sing-box 迁移过来的内存回收机制
+    # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
+    # 避免日志文件持续增长导致的额外内存和 IO 占用。根据当前环境计算
+    # GOMEMLIMIT，并在启动命令中导出该变量。
     local mem_limit cmd_args
     mem_limit=$(_get_mem_limit)
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
         cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-        _info "已启用 Sing-box 内存回收机制：GOMEMLIMIT=${mem_limit}MiB"
     else
         cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
     fi
@@ -2025,8 +1044,6 @@ _uninstall_script() {
     echo "即将删除以下内容："
     echo -e "  ${RED}-${NC} Xray 配置目录: ${XRAY_DIR}"
     echo -e "  ${RED}-${NC} Xray 二进制: ${XRAY_BIN}"
-    echo -e "  ${RED}-${NC} Sing-box 二进制: ${SINGBOX_BIN}"
-    echo -e "  ${RED}-${NC} Sing-box 配置目录: ${SINGBOX_DIR}"
     echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_INSTALL_PATH}"
     [ "$SCRIPT_ALIAS_PATH" != "$SCRIPT_INSTALL_PATH" ] && echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_ALIAS_PATH}"
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
@@ -2037,10 +1054,6 @@ _uninstall_script() {
 
     _info "正在停止并清理 Xray ..."
     _remove_xray_runtime
-
-    _info "正在清理 Sing-box ..."
-    rm -f "$SINGBOX_BIN"
-    rm -rf "$SINGBOX_DIR"
 
     _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
@@ -2059,4 +1072,91 @@ _show_status_header() {
     if [ -f "$XRAY_BIN" ]; then
         xray_ver=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
         if [ "$INIT_SYSTEM" = "systemd" ]; then
-            system
+            systemctl is-active xray >/dev/null 2>&1 && xray_status="${GREEN}● 运行中${NC}" || xray_status="${YELLOW}○ 已停止${NC}"
+        elif [ "$INIT_SYSTEM" = "openrc" ]; then
+            rc-service xray status >/dev/null 2>&1 && xray_status="${GREEN}● 运行中${NC}" || xray_status="${YELLOW}○ 已停止${NC}"
+        else
+            xray_status="${YELLOW}○ 未知${NC}"
+        fi
+    fi
+    local node_count
+    node_count=$(jq '.inbounds | length' "$XRAY_CONFIG" 2>/dev/null || echo 0)
+    echo -e "=================================================="
+    echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
+    echo -e " 单协议: SS2022 + Reality"
+    echo -e "=================================================="
+    if [ -n "$xray_ver" ]; then
+        echo -e " Xray v${xray_ver}: ${xray_status} (${node_count}节点)"
+    else
+        echo -e " Xray: ${xray_status} (${node_count}节点)"
+    fi
+    echo -e "--------------------------------------------------"
+}
+
+_xray_menu() {
+    while true; do
+        clear
+        echo ""
+        _show_status_header
+        echo -e " ${CYAN}【服务控制】${NC}"
+        _menu_item 1  "安装/更新 Xray 内核"
+        _menu_item 2  "启动 Xray"
+        _menu_item 3  "停止 Xray"
+        _menu_item 4  "重启 Xray"
+        _menu_item 5  "查看 Xray 状态"
+        _menu_item 6  "查看 Xray 日志"
+        echo ""
+        echo -e " ${CYAN}【节点管理】${NC}"
+        _menu_item 7  "添加 SS2022+Reality 节点"
+        _menu_item 8  "查看所有节点"
+        _menu_item 9  "删除节点"
+        _menu_item 10 "修改节点端口"
+        _menu_item 11 "更新脚本"
+        _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
+        # 已移除 BBR 优化功能
+        echo ""
+        _menu_danger 88 "卸载 Xray"
+        _menu_danger 99 "卸载脚本"
+        _menu_exit 0 "退出脚本"
+        echo -e "=================================================="
+        read -p "请选择 [0-99]: " choice
+        case "$choice" in
+            1) _install_or_update_xray; _pause ;;
+            2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
+            3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
+            4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
+            5) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
+            6) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
+            7) _init_xray_config; _add_ss2022_reality; _pause ;;
+            8) _view_xray_nodes; _pause ;;
+            9) _delete_xray_node; _pause ;;
+            10) _modify_xray_port; _pause ;;
+            11) _update_script_self; _pause; exit 0 ;;
+            12) _choose_ip_preference ;;
+            88) _uninstall_xray; _pause ;;
+            99) _uninstall_script ;;
+            0) exit 0 ;;
+            *) _error "无效输入。"; _pause ;;
+        esac
+    done
+}
+
+_maybe_handle_internal_subcommand() {
+    # Memory tuning subcommand has been removed. No internal subcommands to handle.
+    return 0
+}
+
+_main() {
+    # 已移除内部子命令处理逻辑，直接执行后续步骤
+    _check_root
+    _detect_init_system
+    _ensure_deps
+    _install_script_shortcut
+    if [ -f "$XRAY_BIN" ]; then
+        _init_xray_config
+        _create_xray_service >/dev/null 2>&1 || true
+    fi
+    _xray_menu
+}
+
+_main "$@"
