@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -24,6 +24,10 @@ DEFAULT_SNI="www.amd.com"
 # values are "ipv4" or "ipv6". If this file does not exist or contains an
 # invalid value, the default is "ipv4".
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
+
+# Cache variable to store the last detected public IP. When network
+# preference is switched, this cache will be cleared to force re-detection.
+SERVER_IP_CACHE=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -167,7 +171,8 @@ _update_script_self() {
 
 _get_public_ip() {
     # If we've already detected the IP during this session, return cached value.
-    [ -n "$server_ip" ] && { echo "$server_ip"; return; }
+    # SERVER_IP_CACHE is a global cache; do not use a local variable here.
+    [ -n "$SERVER_IP_CACHE" ] && { echo "$SERVER_IP_CACHE"; return; }
     local ip="" pref
     pref=$(_get_ip_preference)
     # Attempt detection with curl if available, following user preference first.
@@ -212,7 +217,8 @@ _get_public_ip() {
                                   || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
         fi
     fi
-    server_ip="$ip"
+    # Store detected IP in global cache for reuse.
+    SERVER_IP_CACHE="$ip"
     echo "$ip"
 }
 
@@ -322,6 +328,8 @@ _choose_ip_preference() {
         1)
             if _set_ip_preference ipv4; then
                 _success "已设置 IPv4 优先。"
+                # Reset cached IP so that future detections use new preference
+                unset SERVER_IP_CACHE
             else
                 _error "设置 IPv4 优先失败。"
             fi
@@ -329,6 +337,8 @@ _choose_ip_preference() {
         2)
             if _set_ip_preference ipv6; then
                 _success "已设置 IPv6 优先。"
+                # Reset cached IP so that future detections use new preference
+                unset SERVER_IP_CACHE
             else
                 _error "设置 IPv6 优先失败。"
             fi
@@ -795,12 +805,12 @@ _save_xray_meta() {
 
 _add_ss2022_reality() {
     [ ! -f "$XRAY_BIN" ] && { _error "请先安装/更新 Xray 核心。"; return 1; }
-    [ -z "$server_ip" ] && server_ip=$(_get_public_ip)
-    local node_ip="$server_ip"
+    [ -z "$SERVER_IP_CACHE" ] && SERVER_IP_CACHE=$(_get_public_ip)
+    local node_ip="$SERVER_IP_CACHE"
 
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
+    if [ -n "$SERVER_IP_CACHE" ]; then
+        read -p "请输入服务器 IP (回车默认当前检测 IP: ${SERVER_IP_CACHE}): " custom_ip
+        node_ip=${custom_ip:-$SERVER_IP_CACHE}
     else
         _warn "未能自动检测到当前公网 IP，请手动输入。"
         read -p "请输入服务器 IP: " node_ip
@@ -1093,10 +1103,10 @@ _xray_menu() {
     done
 }
 
-_maybe_handle_internal_subcommand() {
-    # Memory tuning subcommand has been removed. No internal subcommands to handle.
-    return 0
-}
+# The following stub was previously used to handle internal subcommands. It has
+# been removed to simplify the script as there are no longer any internal
+# command-line subcommands to dispatch. If additional subcommands are needed in
+# the future, they can be implemented here.
 
 _main() {
     # 已移除内部子命令处理逻辑，直接执行后续步骤
@@ -1111,4 +1121,10 @@ _main() {
     _xray_menu
 }
 
-_main "$@"
+# Warn if any command-line arguments were supplied. This script does not
+# accept positional parameters; running with parameters can cause confusion.
+if [ "$#" -gt 0 ]; then
+    _warn "脚本不支持任何命令行参数，已忽略传入的 $#, 参数。"
+fi
+
+_main
