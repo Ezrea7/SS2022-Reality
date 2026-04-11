@@ -643,8 +643,8 @@ _install_sing_box() {
     local search_pattern="linux-${arch_tag}${libc_suffix}.tar.gz"
     local release_info download_url checksum_url tmp_tar temp_dir checksums dl_filename expected_hash actual_hash
     release_info=$(curl -fsSL "$api_url" 2>/dev/null || wget -qO- "$api_url" 2>/dev/null) || { _error "无法获取 sing-box 发布信息。"; return 1; }
-    download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains("${search_pattern}")) | .browser_download_url" | head -1)
-    checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith("checksums.txt")) | .browser_download_url' | head -1)
+    download_url=$(echo "$release_info" | jq -r --arg pattern "$search_pattern" '.assets[] | select(.name | contains($pattern)) | .browser_download_url' | head -1)
+    checksum_url=$(echo "$release_info" | jq -r --arg suffix "checksums.txt" '.assets[] | select(.name | endswith($suffix)) | .browser_download_url' | head -1)
 
     if [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
         _error "无法获取 sing-box 下载链接 (搜索: ${search_pattern})。"
