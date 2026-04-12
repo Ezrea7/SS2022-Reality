@@ -57,6 +57,8 @@ reality-hex-shortid=短ID, udp-relay=true,
 udp-over-tcp=sp.v2, tag=节点名称
 ```
 
+### 推荐客户端：Quantumult X
+
 ## 使用说明
 
 ### 管理菜单功能
