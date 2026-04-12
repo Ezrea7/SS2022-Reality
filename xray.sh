@@ -87,17 +87,18 @@ _pkg_install() {
 }
 
 _ensure_deps() {
-    local missing=()
+    local missing
+    missing=""
     for c in jq openssl awk sed grep; do
-        command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+        command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
     done
-    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing+=("curl")
-    command -v unzip >/dev/null 2>&1 || missing+=("unzip")
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing="$missing curl"
+    command -v unzip >/dev/null 2>&1 || missing="$missing unzip"
     command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || _pkg_install iproute2 net-tools
     if command -v apk >/dev/null 2>&1; then
-        [ -f /etc/ssl/certs/ca-certificates.crt ] || missing+=("ca-certificates")
+        [ -f /etc/ssl/certs/ca-certificates.crt ] || missing="$missing ca-certificates"
     fi
-    [ ${#missing[@]} -gt 0 ] && _pkg_install "${missing[@]}"
+    [ -n "$missing" ] && _pkg_install $missing
 }
 
 _install_script_shortcut() {
@@ -428,36 +429,33 @@ _read_first_cgroup_value() {
 }
 
 _get_cgroup_limit_mb() {
-    local cg2_rel cg1_rel mp paths=()
-
-    paths+=(/sys/fs/cgroup/memory.max)
-    paths+=(/sys/fs/cgroup/memory/memory.limit_in_bytes)
+    local cg2_rel cg1_rel mp paths
+    paths="/sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes"
 
     cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
     cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
 
     if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.max")
+        paths="$paths /sys/fs/cgroup${cg2_rel}/memory.max"
     fi
     if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes")
+        paths="$paths /sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes"
+        paths="$paths /sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes"
     fi
 
     while IFS= read -r mp; do
         [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.max")
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.max")
+        paths="$paths $mp/memory.max"
+        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths="$paths $mp$cg2_rel/memory.max"
     done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
 
     while IFS= read -r mp; do
         [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.limit_in_bytes")
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.limit_in_bytes")
+        paths="$paths $mp/memory.limit_in_bytes"
+        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths="$paths $mp$cg1_rel/memory.limit_in_bytes"
     done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
 
-    _read_first_cgroup_value limit $(printf '%s
-' "${paths[@]}" | awk '!seen[$0]++')
+    _read_first_cgroup_value limit $(printf '%s\n' $paths | awk '!seen[$0]++')
 }
 
 _get_effective_total_mem_mb() {
@@ -465,7 +463,7 @@ _get_effective_total_mem_mb() {
     meminfo_mb=$(_get_meminfo_total_mb)
     cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
 
-    if [[ "$cgroup_mb" =~ ^[0-9]+$ ]] && [ "$cgroup_mb" -gt 0 ]; then
+    if [ -n "$cgroup_mb" ] && case "$cgroup_mb" in ''|*[!0-9]*) false ;; *) [ "$cgroup_mb" -gt 0 ] ;; esac; then
         echo "$cgroup_mb"
         return 0
     fi
@@ -480,36 +478,33 @@ _get_effective_total_mem_mb() {
 }
 
 _get_cgroup_current_mb() {
-    local cg2_rel cg1_rel mp paths=() current_est
-
-    paths+=(/sys/fs/cgroup/memory.current)
-    paths+=(/sys/fs/cgroup/memory/memory.usage_in_bytes)
+    local cg2_rel cg1_rel mp paths current_est
+    paths="/sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes"
 
     cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
     cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
 
     if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup${cg2_rel}/memory.current")
+        paths="$paths /sys/fs/cgroup${cg2_rel}/memory.current"
     fi
     if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths+=("/sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes")
-        paths+=("/sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes")
+        paths="$paths /sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes"
+        paths="$paths /sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes"
     fi
 
     while IFS= read -r mp; do
         [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.current")
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths+=("${mp}${cg2_rel}/memory.current")
+        paths="$paths $mp/memory.current"
+        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths="$paths $mp$cg2_rel/memory.current"
     done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
 
     while IFS= read -r mp; do
         [ -n "$mp" ] || continue
-        paths+=("${mp}/memory.usage_in_bytes")
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths+=("${mp}${cg1_rel}/memory.usage_in_bytes")
+        paths="$paths $mp/memory.usage_in_bytes"
+        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths="$paths $mp$cg1_rel/memory.usage_in_bytes"
     done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
 
-    if _read_first_cgroup_value current $(printf '%s
-' "${paths[@]}" | awk '!seen[$0]++'); then
+    if _read_first_cgroup_value current $(printf '%s\n' $paths | awk '!seen[$0]++'); then
         return 0
     fi
 
@@ -522,22 +517,48 @@ _get_cgroup_current_mb() {
     return 1
 }
 
-# 智能 GOMEMLIMIT 计算：
-# 1) 优先使用 cgroup limit，避免 LXC/宿主机内存视图误判。
-# 2) 结合 cgroup current/usage 估算容器当前压力，不使用固定分档。
-# 3) 为内核、页缓存、socket/TLS 缓冲和其他常驻进程保留连续型余量。
-# 4) 将剩余预算交给 GOMEMLIMIT，让 Go 运行时更积极 GC 和归还内存。
-# 内存限制计算函数
-#
-# vless-server.sh 脚本未对 Go 运行时设置任何内存限制，因此我们
-# 保持与其一致，始终返回 0，表示不启用 GOMEMLIMIT。这样所有
-# 内存管理完全由 Xray 内核和 Go 垃圾回收自行处理。
+# 参考 vless-server.sh 的稳定优先思路：不做激进内存干预，但给 Go 运行时设置保守阈值，
+# 让 GC 更积极回收，避免 Xray 在高并发/长连接下内存缓慢膨胀。
 _get_mem_limit() {
-    echo 0
+    local total_mb current_mb limit_mb avail_mb reserve_mb target_mb hard_mb
+
+    total_mb=$(_get_effective_total_mem_mb 2>/dev/null || true)
+    current_mb=$(_get_cgroup_current_mb 2>/dev/null || true)
+    limit_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
+
+    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
+        echo 0
+        return 0
+    fi
+
+    avail_mb=$total_mb
+    if case "$current_mb" in ''|*[!0-9]*) false ;; *) [ "$current_mb" -gt 0 ] && [ "$current_mb" -lt "$total_mb" ] ;; esac; then
+        avail_mb=$((total_mb - current_mb))
+    fi
+
+    reserve_mb=$(( total_mb / 5 ))
+    [ "$reserve_mb" -lt 128 ] && reserve_mb=128
+    [ "$reserve_mb" -gt 1024 ] && reserve_mb=1024
+
+    target_mb=$((avail_mb - reserve_mb))
+    [ "$target_mb" -lt 64 ] && target_mb=64
+    target_mb=$((target_mb * 85 / 100))
+    [ "$target_mb" -lt 64 ] && target_mb=64
+
+    if case "$limit_mb" in ''|*[!0-9]*) false ;; *) [ "$limit_mb" -gt 0 ] ;; esac; then
+        hard_mb=$((limit_mb * 78 / 100))
+        [ "$hard_mb" -lt 64 ] && hard_mb=64
+        [ "$target_mb" -gt "$hard_mb" ] && target_mb="$hard_mb"
+    fi
+
+    if [ "$target_mb" -gt 0 ] 2>/dev/null; then
+        echo "${target_mb}MiB"
+    else
+        echo 0
+    fi
     return 0
 }
 
-# 取消清空内存检测函数的覆盖，使前面定义的检测逻辑生效。
 
 _check_port_occupied() {
     local port="$1"
@@ -581,6 +602,10 @@ _input_port() {
 
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
+    # 尽量关闭运行时自带的高噪声输出，保持脚本和服务侧低日志占用。
+    # 1) Xray 配置默认使用 warning 级别；
+    # 2) systemd/openrc 服务不额外落地运行日志；
+    # 3) 若需排障，可临时调高 loglevel 或手动查看 systemd journal。
     touch "$XRAY_LOG" 2>/dev/null || true
     if [ ! -s "$XRAY_CONFIG" ]; then
         cat > "$XRAY_CONFIG" <<'JSON'
@@ -938,7 +963,8 @@ _delete_xray_node() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local tags=($(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null))
+    local tags
+    tags=$(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
     echo ""
     echo -e "${YELLOW}══════════ 选择要删除的节点 ══════════${NC}"
     for i in "${!tags[@]}"; do
@@ -972,7 +998,8 @@ _modify_xray_port() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local tags=($(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null))
+    local tags
+    tags=$(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
     echo ""
     echo -e "${YELLOW}══════════ 选择要修改端口的节点 ══════════${NC}"
     for i in "${!tags[@]}"; do
