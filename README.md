@@ -58,6 +58,7 @@ udp-over-tcp=sp.v2, tag=节点名称
 ```
 
 ### 推荐客户端：Quantumult X
+#### 如需配置其他客户端请查看脚本内Json配置文件
 
 ## 使用说明
 
