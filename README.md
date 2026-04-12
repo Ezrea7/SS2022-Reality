@@ -45,6 +45,14 @@
 ```
 ss2022
 ```
+
+## Quanumult X配置示例
+
+### 脚本自动生成如下格式配置
+```
+shadowsocks=服务器IP:端口, method=2022-blake3-aes-128-gcm, password=密码, obfs=over-tls, obfs-host=伪装域名, tls-verification=true, reality-base64-pubkey=公钥, reality-hex-shortid=短ID, udp-relay=true, udp-over-tcp=sp.v2, tag=节点名称
+```
+
 ## 使用说明
 
 ### 管理菜单功能
@@ -61,3 +69,21 @@ ss2022
 | 12 | 网络优先级 | 设置 IPv4/IPv6 优先 |
 | 88 | 卸载 Xray | 保留脚本，仅卸载 Xray 核心 |
 | 99 | 卸载脚本 | 完全清理（包含脚本自毁） |
+
+## 配置文件
+
+### 核心配置文件
+```
+/usr/local/etc/xray/config.json
+```
+
+### 节点源数据
+```
+/usr/local/etc/xray/metadata.json
+```
+
+### IP优先级配置
+```
+/usr/local/etc/xray/ip_preference.conf
+```
+
