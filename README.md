@@ -13,10 +13,9 @@
 
 ## ✨ 功能特性
 
-- 🔐 **SS2022 + Reality 协议** - 新一代安全代理协议，抗封锁能力强
+- 🔐 **SS2022 + Reality 协议** - 
 - 🐧 **多发行版支持** - 支持 Alpine (OpenRC)、Debian/Ubuntu (systemd)、CentOS/Rocky/Fedora (systemd) 等
 - 🌐 **双栈 IP 支持** - 支持 IPv4/IPv6 优先级设置，自动检测公网 IP
-- ⚡ **智能内存管理** - 容器环境自动识别，智能计算内存限制
 - 🛠️ **完整节点管理** - 添加、删除、修改端口、查看节点信息
 - 📱 **Quantumult X 配置** - 自动生成 Quantumult X 兼容配置格式
 - 🔄 **脚本自更新** - 一键更新脚本到最新版本
