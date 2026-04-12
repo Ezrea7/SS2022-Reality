@@ -1,38 +1,39 @@
-# 🚀 Xray SS2022 + Reality 一键脚本
-
+# Xray SS2022 + Reality 一键管理脚本
 
 <div align="center">
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Alpine%20%7C%20Debian-green.svg)]()
 [![Protocol](https://img.shields.io/badge/protocol-SS2022%2BReality-orange.svg)]()
+[![Init](https://img.shields.io/badge/init-systemd%20%7C%20openrc-purple.svg)]()
+
+**基于 [大表哥 singbox-lite](https://github.com/0xdabiaoge/singbox-lite) 脚本二次开发**
 
 </div>
 
-> **基于大表哥脚本二次开发**
-> 
-> 支持 SS2022 + Reality 协议，专为 Alpine 和 Debian 系统设计
-
 ## ✨ 功能特性
 
-- 🔐 **SS2022 + Reality 协议** - 新一代安全代理协议
-- 🐧 **多系统支持** - 完美适配 Alpine 和 Debian 系统
-- ⚡ **一键安装** - 自动化部署，无需手动配置
+- 🔐 **SS2022 + Reality 协议** - 新一代安全代理协议，抗封锁能力强
+- 🐧 **多系统支持** - 完美适配 Alpine (OpenRC) 和 Debian (systemd) 系统
+- 🌐 **双栈 IP 支持** - 支持 IPv4/IPv6 优先级设置，自动检测公网 IP
+- ⚡ **智能内存管理** - 容器环境自动识别，智能计算内存限制
+- 🛠️ **完整节点管理** - 添加、删除、修改端口、查看节点信息
 - 📱 **Quantumult X 配置** - 自动生成 Quantumult X 兼容配置格式
+- 🔄 **脚本自更新** - 一键更新脚本到最新版本
+- 🧹 **完整卸载** - 支持保留配置卸载或完全清理（包括脚本自毁）
 
 ## 📋 系统要求
 
-- **操作系统**: Alpine Linux / Debian
-- **架构**: x86_64 / AMD64
-- **权限**: Root 用户权限
+| 项目 | 要求 |
+|------|------|
+| **操作系统** | Alpine Linux / Debian / Ubuntu |
+| **架构** | x86_64 / AMD64 / ARM64 / ARMv7 |
+| **权限** | Root 用户权限 |
+| **网络** | 可访问 GitHub 以下载 Xray 核心 |
 
 ## 🚀 快速开始
 
 ### 一键安装脚本
 
 ```bash
-(curl -LfsS https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 || wget -q https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -O /usr/local/bin/SS2022) && chmod +x /usr/local/bin/SS2022 && SS2022
-
-
-
 (curl -LfsS https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 || wget -q https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -O /usr/local/bin/SS2022) && chmod +x /usr/local/bin/SS2022 && SS2022
