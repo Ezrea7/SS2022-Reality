@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="2.3"
+SCRIPT_VERSION="2.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -517,46 +517,22 @@ _get_cgroup_current_mb() {
     return 1
 }
 
-# 参考 vless-server.sh 的稳定优先思路：不做激进内存干预，但给 Go 运行时设置保守阈值，
-# 让 GC 更积极回收，避免 Xray 在高并发/长连接下内存缓慢膨胀。
+# 参考 sing-box 的思路：以总内存的 90% 作为 Go 运行时上限，
+# 让 GC 更早介入并减少内存持续增长；同时保留少量余量，避免触顶。
 _get_mem_limit() {
-    local total_mb current_mb limit_mb avail_mb reserve_mb target_mb hard_mb
+    local total_mem_mb limit_mb
 
-    total_mb=$(_get_effective_total_mem_mb 2>/dev/null || true)
-    current_mb=$(_get_cgroup_current_mb 2>/dev/null || true)
-    limit_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-
-    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
-        echo 0
-        return 0
+    total_mem_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
+    if ! case "$total_mem_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mem_mb" -gt 0 ] ;; esac; then
+        total_mem_mb=$(_get_meminfo_total_mb)
+    fi
+    if ! case "$total_mem_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mem_mb" -gt 0 ] ;; esac; then
+        total_mem_mb=128
     fi
 
-    avail_mb=$total_mb
-    if case "$current_mb" in ''|*[!0-9]*) false ;; *) [ "$current_mb" -gt 0 ] && [ "$current_mb" -lt "$total_mb" ] ;; esac; then
-        avail_mb=$((total_mb - current_mb))
-    fi
-
-    reserve_mb=$(( total_mb / 5 ))
-    [ "$reserve_mb" -lt 128 ] && reserve_mb=128
-    [ "$reserve_mb" -gt 1024 ] && reserve_mb=1024
-
-    target_mb=$((avail_mb - reserve_mb))
-    [ "$target_mb" -lt 64 ] && target_mb=64
-    target_mb=$((target_mb * 85 / 100))
-    [ "$target_mb" -lt 64 ] && target_mb=64
-
-    if case "$limit_mb" in ''|*[!0-9]*) false ;; *) [ "$limit_mb" -gt 0 ] ;; esac; then
-        hard_mb=$((limit_mb * 78 / 100))
-        [ "$hard_mb" -lt 64 ] && hard_mb=64
-        [ "$target_mb" -gt "$hard_mb" ] && target_mb="$hard_mb"
-    fi
-
-    if [ "$target_mb" -gt 0 ] 2>/dev/null; then
-        echo "${target_mb}MiB"
-    else
-        echo 0
-    fi
-    return 0
+    limit_mb=$((total_mem_mb * 90 / 100))
+    [ "$limit_mb" -lt 10 ] && limit_mb=10
+    echo "${limit_mb}MiB"
 }
 
 
@@ -634,16 +610,42 @@ JSON
     [ -s "$XRAY_METADATA" ] || echo '{}' > "$XRAY_METADATA"
 }
 
-_create_xray_systemd_service() {
-    # 根据当前环境计算 GOMEMLIMIT，并在 systemd 服务中传递给 Xray。
-    local mem_limit env_line
-    mem_limit=$(_get_mem_limit)
-    env_line=""
-    # 如果 mem_limit 非 0，则设置 Environment 指令
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        env_line="Environment=\"GOMEMLIMIT=${mem_limit}\""
+_get_gc_tuning_env() {
+    local total_mb mem_limit_mb gogc
+    total_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
+    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
+        total_mb=$(_get_meminfo_total_mb)
     fi
-    # 为 systemd 创建服务单元。启用 GOMEMLIMIT 环境变量（若 mem_limit 为 0，则不会设置）。
+    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
+        total_mb=128
+    fi
+    mem_limit_mb=$(_get_mem_limit)
+    gogc=100
+    if case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -le 512 ] ;; esac; then
+        gogc=75
+    elif case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -le 1024 ] ;; esac; then
+        gogc=85
+    fi
+    echo "$gogc $mem_limit_mb"
+}
+
+_create_xray_systemd_service() {
+    local gc_tuning gogc mem_limit env_lines
+    gc_tuning=$(_get_gc_tuning_env)
+    gogc=$(printf '%s' "$gc_tuning" | awk '{print $1}')
+    mem_limit=$(printf '%s' "$gc_tuning" | awk '{print $2}')
+    env_lines=""
+    if [ -n "$gogc" ]; then
+        env_lines="Environment=\"GOGC=${gogc}\""
+    fi
+    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
+        if [ -n "$env_lines" ]; then
+            env_lines="${env_lines}
+Environment=\"GOMEMLIMIT=${mem_limit}\""
+        else
+            env_lines="Environment=\"GOMEMLIMIT=${mem_limit}\""
+        fi
+    fi
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -651,7 +653,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-${env_line}
+${env_lines}
 ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
 Restart=on-failure
 RestartSec=3s
@@ -666,15 +668,14 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    # 创建 openrc 服务脚本。我们不再将 Xray 的标准输出/错误重定向到文件，
-    # 避免日志文件持续增长导致的额外内存和 IO 占用。根据当前环境计算
-    # GOMEMLIMIT，并在启动命令中导出该变量。
-    local mem_limit cmd_args
-    mem_limit=$(_get_mem_limit)
+    local gc_tuning gogc mem_limit cmd_args
+    gc_tuning=$(_get_gc_tuning_env)
+    gogc=$(printf '%s' "$gc_tuning" | awk '{print $1}')
+    mem_limit=$(printf '%s' "$gc_tuning" | awk '{print $2}')
     if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cmd_args="-c 'export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+        cmd_args="-c 'export GOGC=${gogc}; export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
     else
-        cmd_args="-c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
+        cmd_args="-c 'export GOGC=${gogc}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
     fi
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
