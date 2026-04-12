@@ -50,7 +50,11 @@ ss2022
 
 ### 脚本自动生成如下格式配置
 ```
-shadowsocks=服务器IP:端口, method=2022-blake3-aes-128-gcm, password=密码, obfs=over-tls, obfs-host=伪装域名, tls-verification=true, reality-base64-pubkey=公钥, reality-hex-shortid=短ID, udp-relay=true, udp-over-tcp=sp.v2, tag=节点名称
+shadowsocks=服务器IP:端口, method=2022-blake3-aes-128-gcm, 
+password=密码, obfs=over-tls, obfs-host=伪装域名, 
+tls-verification=true, reality-base64-pubkey=公钥, 
+reality-hex-shortid=短ID, udp-relay=true, 
+udp-over-tcp=sp.v2, tag=节点名称
 ```
 
 ## 使用说明
