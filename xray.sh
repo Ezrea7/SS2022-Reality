@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="4.1"
+SCRIPT_VERSION="4.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -306,7 +306,7 @@ _check_xray_port_conflict() {
 _input_port() {
     local port=""
     while true; do
-        read -p "请输入监听端口: " port >&2
+        read -p "请输入监听端口: " port
         [[ -z "$port" ]] && _error "端口不能为空。" && continue
         if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
             _error "无效端口号。"
@@ -562,10 +562,23 @@ _build_reality_stream() {
 }
 
 _get_xray_share_link() {
-    local tag="$1" link
-    link=$(jq --arg tag "$tag" -r '.[$tag].qx_link // .[$tag].share_link // empty' "$XRAY_METADATA" 2>/dev/null)
-    [ -n "$link" ] && { printf '%s\n' "$link"; return 0; }
-    _build_qx_link "$tag" 2>/dev/null || true
+    local tag="$1" protocol network security port name
+    protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol // empty' "$XRAY_CONFIG" 2>/dev/null)
+    port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port // empty' "$XRAY_CONFIG" 2>/dev/null)
+    network=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.network // "raw"' "$XRAY_CONFIG" 2>/dev/null)
+    security=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.security // "none"' "$XRAY_CONFIG" 2>/dev/null)
+    name=$(jq --arg tag "$tag" -r '.[$tag].name // empty' "$XRAY_METADATA" 2>/dev/null)
+
+    [ -n "$name" ] || name="$tag"
+
+    local saved_link
+    saved_link=$(jq --arg tag "$tag" -r '.[$tag].qx_link // .[$tag].share_link // empty' "$XRAY_METADATA" 2>/dev/null)
+    [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
+
+    local built_link
+    built_link=$(_build_qx_link "$tag" 2>/dev/null) && [ -n "$built_link" ] && { echo "$built_link"; return 0; }
+
+    jq --arg tag "$tag" -r '.[$tag].share_link // .[$tag].qx_link // empty' "$XRAY_METADATA" 2>/dev/null
 }
 
 _list_xray_tags() {
@@ -612,25 +625,22 @@ _replace_port_in_text() {
 }
 
 _save_xray_meta() {
-    local tag="$1" name="$2" qx_link="$3" password="$4" public_key="$5" short_id="$6" server="$7" sni="$8" method="$9"
-    local tmp="${XRAY_METADATA}.tmp.$$"
+    local tag="$1" name="$2" link="$3"
+    shift 3
 
-    jq --arg t "$tag" --arg n "$name" --arg q "$qx_link" --arg p "$password" --arg pk "$public_key" --arg sid "$short_id" --arg srv "$server" --arg s "$sni" --arg m "$method" '
-        .[$t] = ((.[$t] // {}) + {
-            name: $n,
-            qx_link: $q,
-            share_link: $q,
-            password: $p,
-            publicKey: $pk,
-            shortId: $sid,
-            server: $srv,
-            sni: $s,
-            method: $m
-        })
-    ' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
+    local tmp="${XRAY_METADATA}.tmp.$$"
+    jq --arg t "$tag" --arg n "$name" --arg l "$link" '. + {($t): {name: $n, share_link: $l}}' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
         rm -f "$tmp"
         return 1
     }
+
+    for pair in "$@"; do
+        local key="${pair%%=*}"
+        local val="${pair#*=}"
+        [ -n "$key" ] && [ -n "$val" ] || continue
+        tmp="${XRAY_METADATA}.tmp.$$"
+        jq --arg t "$tag" --arg k "$key" --arg v "$val" '.[$t][$k] = $v' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+    done
 }
 
 _build_qx_link() {
@@ -749,7 +759,14 @@ _add_ss2022_reality() {
 
     qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
 
-    _save_xray_meta "$tag" "$name" "$qx_link" "$password" "$REALITY_PUBLIC_KEY" "$REALITY_SHORT_ID" "$node_ip" "$sni" "$method"
+    _save_xray_meta "$tag" "$name" "$qx_link" \
+        "qx_link=${qx_link}" \
+        "password=${password}" \
+        "publicKey=${REALITY_PUBLIC_KEY}" \
+        "shortId=${REALITY_SHORT_ID}" \
+        "server=${node_ip}" \
+        "sni=${sni}" \
+        "method=${method}"
 
     _manage_xray_service restart
     _success "SS2022+Reality 节点 [${name}] 添加成功。"
@@ -810,7 +827,7 @@ _modify_xray_port() {
         return
     fi
 
-    local target_tag old_port target_name new_port new_tag new_name old_qx_link new_link tmp
+    local target_tag old_port target_name new_port new_tag new_name old_link new_link old_qx_link tmp
     target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
     old_port=$(jq --arg tag "$target_tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
     target_name=$(_get_xray_tag_name "$target_tag")
@@ -837,9 +854,7 @@ _modify_xray_port() {
     new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
     [ -n "$new_link" ] || new_link=$(_build_qx_link "$new_tag" 2>/dev/null)
     tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '
-        . + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l, share_link: $l})} | del(.[$ot])
-    ' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
 
     _manage_xray_service restart
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
