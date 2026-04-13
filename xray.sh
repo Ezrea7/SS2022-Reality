@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="1.1"
+SCRIPT_VERSION="4.1"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -306,7 +306,7 @@ _check_xray_port_conflict() {
 _input_port() {
     local port=""
     while true; do
-        read -p "请输入监听端口: " port
+        read -p "请输入监听端口: " port >&2
         [[ -z "$port" ]] && _error "端口不能为空。" && continue
         if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
             _error "无效端口号。"
