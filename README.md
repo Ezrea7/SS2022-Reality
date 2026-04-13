@@ -37,7 +37,7 @@
 ### 一键安装脚本
 
 ```bash
-(curl -LfsS https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 || wget -q https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -O /usr/local/bin/SS2022) && chmod +x /usr/local/bin/SS2022 && SS2022
+curl -fsSL https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 && chmod +x /usr/local/bin/SS2022 && /usr/local/bin/SS2022
 ```
 ## 快捷指令
 
