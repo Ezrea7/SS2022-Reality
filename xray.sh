@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="2.6"
+SCRIPT_VERSION="2.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -39,6 +39,7 @@ _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
 trap 'rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
 
 _pause() {
+    [ -t 0 ] || return 0
     echo ""
     read -p "按回车键继续..." _
 }
@@ -87,9 +88,9 @@ _pkg_install() {
 }
 
 _ensure_deps() {
-    local missing
+    local missing still_missing c
     missing=""
-    for c in jq openssl awk sed grep; do
+    for c in bash jq openssl awk sed grep; do
         command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing="$missing curl"
@@ -99,6 +100,16 @@ _ensure_deps() {
         [ -f /etc/ssl/certs/ca-certificates.crt ] || missing="$missing ca-certificates"
     fi
     [ -n "$missing" ] && _pkg_install $missing
+
+    still_missing=""
+    for c in bash jq openssl awk sed grep unzip; do
+        command -v "$c" >/dev/null 2>&1 || still_missing="$still_missing $c"
+    done
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || still_missing="$still_missing curl"
+    if [ -n "$still_missing" ]; then
+        _error "缺少依赖: ${still_missing# }"
+        return 1
+    fi
 }
 
 _install_script_shortcut() {
@@ -167,50 +178,25 @@ _update_script_self() {
 }
 
 _get_public_ip() {
-    # If we've already detected the IP during this session, return cached value.
     [ -n "$server_ip" ] && { echo "$server_ip"; return; }
     local ip="" pref
     pref=$(_get_ip_preference)
-    # Attempt detection with curl if available, following user preference first.
-    # Use built-in timeout options instead of separate `timeout` command for broader compatibility.
-    # Try multiple services: icanhazip.com, ipinfo.io/ip, and api.ipify.org (or api6.ipify.org for IPv6).
     if command -v curl >/dev/null 2>&1; then
         if [ "$pref" = "ipv6" ]; then
-            # Prefer IPv6 first; use api6.ipify.org for IPv6 fallback
-            ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-                 || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                 || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
-            # If IPv6 detection failed, fall back to IPv4 detection
-            [ -z "$ip" ] && ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-                                  || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                                  || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
+            ip=$(curl -s6 --max-time 3 api6.ipify.org 2>/dev/null || curl -s6 --max-time 3 icanhazip.com 2>/dev/null)
+            [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 api.ipify.org 2>/dev/null || curl -s4 --max-time 3 icanhazip.com 2>/dev/null)
         else
-            # Prefer IPv4 first; use api.ipify.org for IPv4 fallback
-            ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-                 || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                 || curl -s4 --max-time 5 api.ipify.org 2>/dev/null)
-            # If IPv4 detection failed, fall back to IPv6 detection
-            [ -z "$ip" ] && ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-                                  || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-                                  || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null)
+            ip=$(curl -s4 --max-time 3 api.ipify.org 2>/dev/null || curl -s4 --max-time 3 icanhazip.com 2>/dev/null)
+            [ -z "$ip" ] && ip=$(curl -s6 --max-time 3 api6.ipify.org 2>/dev/null || curl -s6 --max-time 3 icanhazip.com 2>/dev/null)
         fi
     fi
-    # Fallback to wget if curl didn't yield a result
     if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
         if [ "$pref" = "ipv6" ]; then
-            ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
+            ip=$(wget -qO- -6 --timeout=3 api6.ipify.org 2>/dev/null || wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null)
+            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=3 api.ipify.org 2>/dev/null || wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null)
         else
-            ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                 || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                                  || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null)
+            ip=$(wget -qO- -4 --timeout=3 api.ipify.org 2>/dev/null || wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null)
+            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=3 api6.ipify.org 2>/dev/null || wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null)
         fi
     fi
     server_ip="$ip"
@@ -285,12 +271,7 @@ _apply_system_ip_preference() {
     local gai_conf="/etc/gai.conf"
     # Ensure the configuration file exists
     [ -f "$gai_conf" ] || touch "$gai_conf"
-    # Create a single backup if one does not yet exist
-    if [ ! -f "${gai_conf}.bak" ]; then
-        cp -a "$gai_conf" "${gai_conf}.bak" 2>/dev/null || true
-    fi
-    # Comment out any existing uncommented precedence rule for IPv4-mapped addresses
-    # Comment out precedence lines for IPv4-mapped addresses
+    # 取消脚本内的备份文件操作，直接按当前配置原地调整。
     sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
     if [ "$pref" = "ipv4" ]; then
         # Append the IPv4 precedence rule if it is not already present
@@ -379,160 +360,11 @@ _choose_ip_preference() {
 
 
 
-_get_meminfo_total_mb() {
-    local total_mem_mb=0
-    total_mem_mb=$(awk '/MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        if command -v free >/dev/null 2>&1; then
-            total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-        fi
-    fi
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        total_mem_mb=128
-    fi
-    echo "$total_mem_mb"
-}
 
-_is_likely_container() {
-    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -cq >/dev/null 2>&1; then
-        return 0
-    fi
-    grep -qaE '(lxc|docker|container|kubepods|podman)' /proc/1/environ /proc/1/cgroup 2>/dev/null && return 0
-    return 1
-}
-
-_read_first_cgroup_value() {
-    local mode="$1" path raw bytes mb
-    shift
-    for path in "$@"; do
-        [ -n "$path" ] || continue
-        [ -r "$path" ] || continue
-        raw=$(tr -d '[:space:]' < "$path" 2>/dev/null)
-        [ -n "$raw" ] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" = "max" ]; then
-            continue
-        fi
-        [[ "$raw" =~ ^[0-9]+$ ]] || continue
-        if [ "$mode" = "limit" ] && [ "$raw" -ge 9223372036854770000 ] 2>/dev/null; then
-            continue
-        fi
-        bytes=$raw
-        mb=$((bytes / 1024 / 1024))
-        [ "$mb" -ge 0 ] || continue
-        if [ "$mode" = "limit" ] && [ "$mb" -le 0 ]; then
-            continue
-        fi
-        echo "$mb"
-        return 0
-    done
-    return 1
-}
-
-_get_cgroup_limit_mb() {
-    local cg2_rel cg1_rel mp paths
-    paths="/sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes"
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths="$paths /sys/fs/cgroup${cg2_rel}/memory.max"
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths="$paths /sys/fs/cgroup/memory${cg1_rel}/memory.limit_in_bytes"
-        paths="$paths /sys/fs/cgroup${cg1_rel}/memory.limit_in_bytes"
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths="$paths $mp/memory.max"
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths="$paths $mp$cg2_rel/memory.max"
-    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths="$paths $mp/memory.limit_in_bytes"
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths="$paths $mp$cg1_rel/memory.limit_in_bytes"
-    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    _read_first_cgroup_value limit $(printf '%s\n' $paths | awk '!seen[$0]++')
-}
-
-_get_effective_total_mem_mb() {
-    local meminfo_mb cgroup_mb
-    meminfo_mb=$(_get_meminfo_total_mb)
-    cgroup_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-
-    if [ -n "$cgroup_mb" ] && case "$cgroup_mb" in ''|*[!0-9]*) false ;; *) [ "$cgroup_mb" -gt 0 ] ;; esac; then
-        echo "$cgroup_mb"
-        return 0
-    fi
-
-    if _is_likely_container && [ "$meminfo_mb" -gt 512 ]; then
-        _warn "未可靠识别到容器内存限制，当前 /proc/meminfo 显示 ${meminfo_mb}MB；为避免误判宿主机内存，保守回退到 512MB。"
-        echo 512
-        return 0
-    fi
-
-    echo "$meminfo_mb"
-}
-
-_get_cgroup_current_mb() {
-    local cg2_rel cg1_rel mp paths current_est
-    paths="/sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes"
-
-    cg2_rel=$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-    cg1_rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/{print $3; exit}' /proc/self/cgroup 2>/dev/null)
-
-    if [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ]; then
-        paths="$paths /sys/fs/cgroup${cg2_rel}/memory.current"
-    fi
-    if [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ]; then
-        paths="$paths /sys/fs/cgroup/memory${cg1_rel}/memory.usage_in_bytes"
-        paths="$paths /sys/fs/cgroup${cg1_rel}/memory.usage_in_bytes"
-    fi
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths="$paths $mp/memory.current"
-        [ -n "$cg2_rel" ] && [ "$cg2_rel" != "/" ] && paths="$paths $mp$cg2_rel/memory.current"
-    done < <(awk '$0 ~ / - cgroup2 / {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    while IFS= read -r mp; do
-        [ -n "$mp" ] || continue
-        paths="$paths $mp/memory.usage_in_bytes"
-        [ -n "$cg1_rel" ] && [ "$cg1_rel" != "/" ] && paths="$paths $mp$cg1_rel/memory.usage_in_bytes"
-    done < <(awk '$0 ~ / - cgroup / && $0 ~ /(^|,)memory(,|$)/ {print $5}' /proc/self/mountinfo 2>/dev/null)
-
-    if _read_first_cgroup_value current $(printf '%s\n' $paths | awk '!seen[$0]++'); then
-        return 0
-    fi
-
-    current_est=$(awk '/MemTotal:/{t=$2}/MemAvailable:/{a=$2} END{if(t>0 && a>=0 && t>=a) print int((t-a)/1024)}' /proc/meminfo 2>/dev/null)
-    if [[ "$current_est" =~ ^[0-9]+$ ]] && [ "$current_est" -ge 0 ]; then
-        echo "$current_est"
-        return 0
-    fi
-
-    return 1
-}
-
-# 参考 sing-box 的思路：以总内存的 90% 作为 Go 运行时上限，
-# 让 GC 更早介入并减少内存持续增长；同时保留少量余量，避免触顶。
 _get_mem_limit() {
-    local total_mem_mb limit_mb
-
-    total_mem_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-    if ! case "$total_mem_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mem_mb" -gt 0 ] ;; esac; then
-        total_mem_mb=$(_get_meminfo_total_mb)
-    fi
-    if ! case "$total_mem_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mem_mb" -gt 0 ] ;; esac; then
-        total_mem_mb=128
-    fi
-
-    limit_mb=$((total_mem_mb * 90 / 100))
-    [ "$limit_mb" -lt 10 ] && limit_mb=10
-    echo "${limit_mb}MiB"
+    # 取消内存回收/限额机制，交由 Xray/Go 内核自行处理。
+    echo 0
+    return 0
 }
 
 
@@ -610,42 +442,8 @@ JSON
     [ -s "$XRAY_METADATA" ] || echo '{}' > "$XRAY_METADATA"
 }
 
-_get_gc_tuning_env() {
-    local total_mb mem_limit_mb gogc
-    total_mb=$(_get_cgroup_limit_mb 2>/dev/null || true)
-    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
-        total_mb=$(_get_meminfo_total_mb)
-    fi
-    if ! case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -gt 0 ] ;; esac; then
-        total_mb=128
-    fi
-    mem_limit_mb=$(_get_mem_limit)
-    gogc=100
-    if case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -le 512 ] ;; esac; then
-        gogc=75
-    elif case "$total_mb" in ''|*[!0-9]*) false ;; *) [ "$total_mb" -le 1024 ] ;; esac; then
-        gogc=85
-    fi
-    echo "$gogc $mem_limit_mb"
-}
 
 _create_xray_systemd_service() {
-    local gc_tuning gogc mem_limit env_lines
-    gc_tuning=$(_get_gc_tuning_env)
-    gogc=$(printf '%s' "$gc_tuning" | awk '{print $1}')
-    mem_limit=$(printf '%s' "$gc_tuning" | awk '{print $2}')
-    env_lines=""
-    if [ -n "$gogc" ]; then
-        env_lines="Environment=\"GOGC=${gogc}\""
-    fi
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        if [ -n "$env_lines" ]; then
-            env_lines="${env_lines}
-Environment=\"GOMEMLIMIT=${mem_limit}\""
-        else
-            env_lines="Environment=\"GOMEMLIMIT=${mem_limit}\""
-        fi
-    fi
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -653,8 +451,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-${env_lines}
-ExecStart=/bin/sh -c 'exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'
+ExecStart=${XRAY_BIN} run -c ${XRAY_CONFIG}
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
@@ -668,20 +465,11 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    local gc_tuning gogc mem_limit cmd_args
-    gc_tuning=$(_get_gc_tuning_env)
-    gogc=$(printf '%s' "$gc_tuning" | awk '{print $1}')
-    mem_limit=$(printf '%s' "$gc_tuning" | awk '{print $2}')
-    if [ -n "$mem_limit" ] && [ "$mem_limit" != "0" ]; then
-        cmd_args="-c 'export GOGC=${gogc}; export GOMEMLIMIT=${mem_limit}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-    else
-        cmd_args="-c 'export GOGC=${gogc}; exec ${XRAY_BIN} run -c ${XRAY_CONFIG}'"
-    fi
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
-command="/bin/sh"
-command_args="${cmd_args}"
+command="${XRAY_BIN}"
+command_args="run -c ${XRAY_CONFIG}"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
@@ -699,6 +487,7 @@ EOF2
     rc-update add xray default >/dev/null 2>&1 || true
 }
 
+
 _create_xray_service() {
     case "$INIT_SYSTEM" in
         systemd) _create_xray_systemd_service ;;
@@ -712,7 +501,11 @@ _manage_xray_service() {
     case "$INIT_SYSTEM" in
         systemd)
             if [ "$action" = "status" ]; then
-                systemctl status xray --no-pager
+                if systemctl is-active --quiet xray >/dev/null 2>&1; then
+                    _success "Xray 服务运行中。"
+                else
+                    _warn "Xray 服务已停止。"
+                fi
                 return
             fi
             if systemctl "$action" xray >/dev/null 2>&1; then
@@ -728,7 +521,11 @@ _manage_xray_service() {
             ;;
         openrc)
             if [ "$action" = "status" ]; then
-                rc-service xray status
+                if rc-service xray status >/dev/null 2>&1; then
+                    _success "Xray 服务运行中。"
+                else
+                    _warn "Xray 服务已停止。"
+                fi
                 return
             fi
             if rc-service xray "$action" >/dev/null 2>&1; then
@@ -747,7 +544,6 @@ _manage_xray_service() {
             ;;
     esac
 }
-
 _install_or_update_xray() {
     local is_first_install=false
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
@@ -941,9 +737,9 @@ _view_xray_nodes() {
     echo ""
     echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
     local count=0
-    local tags
-    tags=$(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
-    for tag in $tags; do
+    local -a tags
+    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
+    for tag in "${tags[@]}"; do
         count=$((count + 1))
         local port protocol name security network link
         protocol=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .protocol" "$XRAY_CONFIG")
