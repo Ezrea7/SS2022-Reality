@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.3"
+SCRIPT_VERSION="3.4"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -584,23 +584,63 @@ _list_xray_tags() {
     jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
 }
 
+_get_xray_meta_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
+}
+
+_get_xray_tag_name() {
+    local tag="$1" name
+    name=$(_get_xray_meta_field "$tag" name)
+    [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
+}
+
+_delete_xray_inbound_by_tag() {
+    local tag="$1"
+    local tmp="${XRAY_CONFIG}.tmp.$$"
+    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag == $tag))' "$XRAY_CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_CONFIG" || {
+        rm -f "$tmp"
+        _error "删除节点配置失败。"
+        return 1
+    }
+}
+
+_update_xray_inbound_port_and_tag() {
+    local tag="$1" new_port="$2" new_tag="$3"
+    local tmp="${XRAY_CONFIG}.tmp.$$"
+    jq --arg tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" '
+        (.inbounds[] | select(.tag == $tag) | .port) = $new_port |
+        (.inbounds[] | select(.tag == $tag) | .tag) = $new_tag
+    ' "$XRAY_CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_CONFIG" || {
+        rm -f "$tmp"
+        _error "更新节点端口失败。"
+        return 1
+    }
+}
+
+_replace_port_in_text() {
+    local text="$1" old_port="$2" new_port="$3"
+    printf '%s' "$text" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g"
+}
+
 _select_xray_tag() {
     local prompt="$1"
+    local choice
     local -a tags
     mapfile -t tags < <(_list_xray_tags)
     [ "${#tags[@]}" -gt 0 ] || return 1
 
-    echo ""
-    echo -e "${YELLOW}${prompt}${NC}"
+    echo "" >&2
+    echo -e "${YELLOW}${prompt}${NC}" >&2
     for i in "${!tags[@]}"; do
         local tag="${tags[$i]}" port name
         port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
         name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
-        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
+        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})" >&2
     done
-    echo -e "  ${RED}[0]${NC} 返回"
-    echo ""
-    read -p "请选择 [0-${#tags[@]}]: " choice
+    echo -e "  ${RED}[0]${NC} 返回" >&2
+    echo "" >&2
+    read -p "请选择 [0-${#tags[@]}]: " choice >&2
 
     [ "$choice" = "0" ] && return 1
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
@@ -608,7 +648,7 @@ _select_xray_tag() {
         return 1
     fi
 
-    echo "${tags[$((choice-1))]}"
+    printf '%s\n' "${tags[$((choice-1))]}"
 }
 
 _add_ss2022_reality() {
@@ -661,7 +701,7 @@ _add_ss2022_reality() {
             "settings": {
                 "method": $method,
                 "password": $password,
-                "network": "tcp"
+                "network": "tcp,udp"
             },
             "streamSettings": $stream
         }')
@@ -716,11 +756,11 @@ _delete_xray_node() {
 
     local target_tag target_name
     target_tag=$(_select_xray_tag "══════════ 选择要删除的节点 ══════════") || return
-    target_name=$(jq -r ".\"$target_tag\".name // \"$target_tag\"" "$XRAY_METADATA" 2>/dev/null)
+    target_name=$(_get_xray_tag_name "$target_tag")
     read -p "确定删除 [${target_name}]? (y/N): " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "已取消。"; return; }
 
-    _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$target_tag\"))" || return 1
+    _delete_xray_inbound_by_tag "$target_tag" || return 1
     _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
     _manage_xray_service restart
     _success "节点 [${target_name}] 已删除。"
@@ -734,21 +774,29 @@ _modify_xray_port() {
 
     local target_tag old_port target_name new_port new_tag new_name old_link new_link tmp
     target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
-    old_port=$(jq -r ".inbounds[] | select(.tag == \"$target_tag\") | .port" "$XRAY_CONFIG")
-    target_name=$(jq -r ".\"$target_tag\".name // \"$target_tag\"" "$XRAY_METADATA" 2>/dev/null)
+    old_port=$(jq --arg tag "$target_tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+    target_name=$(_get_xray_tag_name "$target_tag")
+
+    [ -n "$old_port" ] && [ "$old_port" != "null" ] || { _error "未找到目标节点端口。"; return 1; }
 
     _info "当前端口: ${old_port}"
     new_port=$(_input_port)
-    new_tag=$(echo "$target_tag" | sed "s/${old_port}/${new_port}/g")
-    new_name=$(echo "$target_name" | sed "s/${old_port}/${new_port}/g")
+    new_tag=$(printf '%s' "$target_tag" | sed "s/${old_port}/${new_port}/g")
+    new_name=$(printf '%s' "$target_name" | sed "s/${old_port}/${new_port}/g")
+    [ -n "$new_tag" ] || new_tag="$target_tag"
+    [ -n "$new_name" ] || new_name="$target_name"
 
-    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$target_tag\") | .port) = $new_port" || return 1
-    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$target_tag\") | .tag) = \"$new_tag\"" || return 1
+    if [ "$new_tag" != "$target_tag" ] && jq -e --arg tag "$new_tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+        _error "修改后的节点标签已存在，请调整节点名称后再试。"
+        return 1
+    fi
 
-    old_link=$(jq -r ".\"$target_tag\".share_link // empty" "$XRAY_METADATA" 2>/dev/null)
-    new_link=$(echo "$old_link" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g")
+    _update_xray_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
+
+    old_link=$(jq --arg tag "$target_tag" -r '.[$tag].share_link // empty' "$XRAY_METADATA" 2>/dev/null)
+    new_link=$(_replace_port_in_text "$old_link" "$old_port" "$new_port")
     tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): (.[$ot] + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
 
     _manage_xray_service restart
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
