@@ -93,4 +93,6 @@ udp-over-tcp=sp.v2, tag=节点名称
 ```
 /usr/local/etc/xray/ip_preference.conf
 ```
+# 更新日志
 
+4.13://  精简脚本代码、整体稳定的不能再稳定
