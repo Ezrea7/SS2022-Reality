@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="2.9"
+SCRIPT_VERSION="2.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -683,15 +683,23 @@ _add_ss2022_reality() {
     sni=${custom_sni:-$DEFAULT_SNI}
 
     local default_name="SS2022-REALITY-${port}"
-    read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-    local name=${custom_name:-$default_name}
+    while true; do
+        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
+        local name=${custom_name:-$default_name}
+        local tag="$name"
+        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+            _error "节点名称已存在，请重新输入。"
+            continue
+        fi
+        break
+    done
 
     local method="2022-blake3-aes-128-gcm"
     local password
     password=$(openssl rand -base64 16)
     _generate_reality_keys || return 1
 
-    local tag="xray-ss2022-reality-${port}"
+    local tag="$name"
     local link_ip="$node_ip"; [[ "$node_ip" == *":"* ]] && link_ip="[$node_ip]"
 
     local stream
@@ -713,7 +721,7 @@ _add_ss2022_reality() {
 
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
 
-    local qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
+    local qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${tag}"
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
         "publicKey=${REALITY_PUBLIC_KEY}" \
@@ -742,12 +750,12 @@ _view_xray_nodes() {
     for tag in "${tags[@]}"; do
         count=$((count + 1))
         local port protocol name security network link
-        protocol=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .protocol" "$XRAY_CONFIG")
-        port=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .port" "$XRAY_CONFIG")
-        network=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .streamSettings.network // \"raw\"" "$XRAY_CONFIG")
-        security=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .streamSettings.security // \"none\"" "$XRAY_CONFIG")
-        name=$(jq -r ".\"$tag\".name // \"$tag\"" "$XRAY_METADATA" 2>/dev/null)
-        link=$(jq -r ".\"$tag\".share_link // empty" "$XRAY_METADATA" 2>/dev/null)
+        protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol' "$XRAY_CONFIG")
+        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+        network=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.network // "raw"' "$XRAY_CONFIG")
+        security=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.security // "none"' "$XRAY_CONFIG")
+        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
+        link=$(jq --arg tag "$tag" -r '.[$tag].share_link // empty' "$XRAY_METADATA" 2>/dev/null)
         echo ""
         echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
         echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
@@ -760,15 +768,15 @@ _delete_xray_node() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local tags
-    tags=$(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
+    local -a tags
+    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
     echo ""
     echo -e "${YELLOW}══════════ 选择要删除的节点 ══════════${NC}"
     for i in "${!tags[@]}"; do
         local tag="${tags[$i]}"
         local port name
-        port=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .port" "$XRAY_CONFIG")
-        name=$(jq -r ".\"$tag\".name // \"$tag\"" "$XRAY_METADATA" 2>/dev/null)
+        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
         echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
     done
     echo -e "  ${RED}[0]${NC} 返回"
@@ -795,15 +803,15 @@ _modify_xray_port() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local tags
-    tags=$(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
+    local -a tags
+    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
     echo ""
     echo -e "${YELLOW}══════════ 选择要修改端口的节点 ══════════${NC}"
     for i in "${!tags[@]}"; do
         local tag="${tags[$i]}"
         local port name
-        port=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .port" "$XRAY_CONFIG")
-        name=$(jq -r ".\"$tag\".name // \"$tag\"" "$XRAY_METADATA" 2>/dev/null)
+        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
         echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
     done
     echo -e "  ${RED}[0]${NC} 返回"
