@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.1"
+SCRIPT_VERSION="3.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -401,6 +401,57 @@ _create_xray_service() {
     esac
 }
 
+_get_xray_core_version() {
+    [ -x "$XRAY_BIN" ] || { echo "未安装"; return 0; }
+    local version
+    version=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
+    [ -n "$version" ] && echo "v${version}" || echo "未知版本"
+}
+
+_get_xray_node_count() {
+    [ -f "$XRAY_CONFIG" ] || { echo "0"; return 0; }
+    jq -r '.inbounds | length' "$XRAY_CONFIG" 2>/dev/null || echo "0"
+}
+
+_get_xray_service_status() {
+    [ -x "$XRAY_BIN" ] || { echo "未安装"; return 0; }
+
+    local active=""
+    case "$INIT_SYSTEM" in
+        systemd)
+            systemctl is-active --quiet xray >/dev/null 2>&1 && active=1 || active=0
+            ;;
+        openrc)
+            rc-service xray status >/dev/null 2>&1 && active=1 || active=0
+            ;;
+        *)
+            pgrep -f "$XRAY_BIN" >/dev/null 2>&1 && active=1 || active=0
+            ;;
+    esac
+
+    if [ "$active" = "1" ]; then
+        echo "● 运行中"
+    else
+        echo "○ 未运行"
+    fi
+}
+
+_show_xray_runtime_summary() {
+    local version status count suffix
+    version=$(_get_xray_core_version)
+    status=$(_get_xray_service_status)
+    count=$(_get_xray_node_count)
+
+    if [ "$count" = "1" ]; then
+        suffix="节点"
+    else
+        suffix="节点"
+    fi
+
+    echo -e " Xray ${YELLOW}${version}${NC}: ${GREEN}${status}${NC} (${count}${suffix})"
+    echo -e "--------------------------------------------------"
+}
+
 _manage_xray_service() {
     local action="$1" result=1
     case "$INIT_SYSTEM" in
@@ -768,6 +819,7 @@ _xray_menu() {
         echo -e "=================================================="
         echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
         echo -e " 单协议: SS2022 + Reality"
+        _show_xray_runtime_summary
         echo -e "=================================================="
         echo -e " ${CYAN}【服务控制】${NC}"
         _menu_item 1  "安装/更新 Xray 内核"
