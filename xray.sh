@@ -661,7 +661,7 @@ _add_ss2022_reality() {
             "settings": {
                 "method": $method,
                 "password": $password,
-                "network": "tcp,udp"
+                "network": "tcp"
             },
             "streamSettings": $stream
         }')
