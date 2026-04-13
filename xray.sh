@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.5"
+SCRIPT_VERSION="3.4"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -715,7 +715,7 @@ _add_ss2022_reality() {
             "settings": {
                 "method": $method,
                 "password": $password,
-                "network": "tcp"
+                "network": "tcp,udp"
             },
             "streamSettings": $stream
         }')
