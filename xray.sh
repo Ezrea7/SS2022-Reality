@@ -645,31 +645,33 @@ _save_xray_meta() {
 
 _build_qx_link() {
     local tag="$1"
-    local protocol port name method password sni public_key short_id server_ip link_ip
+    local port name method password sni public_key short_id server_ip link_ip qx_link
 
-    protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol // empty' "$XRAY_CONFIG" 2>/dev/null)
     port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port // empty' "$XRAY_CONFIG" 2>/dev/null)
+    [ -n "$port" ] || return 1
+
     name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
+    [ -n "$name" ] || name="$tag"
 
-    if [ "$protocol" = "shadowsocks" ]; then
-        method=$(jq --arg tag "$tag" -r '.[$tag].method // empty' "$XRAY_METADATA" 2>/dev/null)
-        password=$(jq --arg tag "$tag" -r '.[$tag].password // empty' "$XRAY_METADATA" 2>/dev/null)
-        sni=$(jq --arg tag "$tag" -r '.[$tag].sni // empty' "$XRAY_METADATA" 2>/dev/null)
-        public_key=$(jq --arg tag "$tag" -r '.[$tag].publicKey // empty' "$XRAY_METADATA" 2>/dev/null)
-        short_id=$(jq --arg tag "$tag" -r '.[$tag].shortId // empty' "$XRAY_METADATA" 2>/dev/null)
-        server_ip=$(jq --arg tag "$tag" -r '.[$tag].server // empty' "$XRAY_METADATA" 2>/dev/null)
-        [ -n "$server_ip" ] || server_ip=$(_get_public_ip)
-        link_ip="$server_ip"
-        [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    method=$(jq --arg tag "$tag" -r '.[$tag].method // empty' "$XRAY_METADATA" 2>/dev/null)
+    password=$(jq --arg tag "$tag" -r '.[$tag].password // empty' "$XRAY_METADATA" 2>/dev/null)
+    sni=$(jq --arg tag "$tag" -r '.[$tag].sni // empty' "$XRAY_METADATA" 2>/dev/null)
+    public_key=$(jq --arg tag "$tag" -r '.[$tag].publicKey // empty' "$XRAY_METADATA" 2>/dev/null)
+    short_id=$(jq --arg tag "$tag" -r '.[$tag].shortId // empty' "$XRAY_METADATA" 2>/dev/null)
+    server_ip=$(jq --arg tag "$tag" -r '.[$tag].server // empty' "$XRAY_METADATA" 2>/dev/null)
 
-        if [ -n "$method" ] && [ -n "$password" ] && [ -n "$sni" ] && [ -n "$public_key" ] && [ -n "$short_id" ] && [ -n "$port" ]; then
-            printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, udp-over-tcp=sp.v2, tag=%s' \
-                "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
-            return 0
-        fi
-    fi
+    [ -n "$method" ] || return 1
+    [ -n "$password" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
 
-    return 1
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+
+    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${public_key}, reality-hex-shortid=${short_id}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
+    printf '%s\n' "$qx_link"
 }
 _select_xray_tag() {
     local prompt="$1"
@@ -755,8 +757,7 @@ _add_ss2022_reality() {
 
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
 
-    qx_link=$(_build_qx_link "$tag" 2>/dev/null)
-    [ -n "$qx_link" ] || qx_link=""
+    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
         "qx_link=${qx_link}" \
@@ -826,7 +827,7 @@ _modify_xray_port() {
         return
     fi
 
-    local target_tag old_port target_name new_port new_tag new_name old_link new_link tmp
+    local target_tag old_port target_name new_port new_tag new_name old_link new_link old_qx_link tmp
     target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
     old_port=$(jq --arg tag "$target_tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
     target_name=$(_get_xray_tag_name "$target_tag")
@@ -845,11 +846,13 @@ _modify_xray_port() {
         return 1
     fi
 
+    local old_qx_link new_link tmp
+    old_qx_link=$(_get_xray_share_link "$target_tag")
+
     _update_xray_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
 
-    local new_link
-    new_link=$(_build_qx_link "$new_tag" 2>/dev/null)
-    [ -n "$new_link" ] || new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
+    new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
+    [ -n "$new_link" ] || new_link=$(_build_qx_link "$new_tag" 2>/dev/null)
     tmp="${XRAY_METADATA}.tmp.$$"
     jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
 
