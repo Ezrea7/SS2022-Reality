@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.7"
+SCRIPT_VERSION="3.4"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -672,6 +672,7 @@ _build_qx_link() {
     return 1
 }
 _select_xray_tag() {
+    local prompt="$1"
     local choice
     local -a tags
     mapfile -t tags < <(_list_xray_tags)
@@ -747,17 +748,15 @@ _add_ss2022_reality() {
             "settings": {
                 "method": $method,
                 "password": $password,
-                "network": "tcp"
+                "network": "tcp,udp"
             },
             "streamSettings": $stream
         }')
 
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
 
-    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${tag}"
-
     qx_link=$(_build_qx_link "$tag" 2>/dev/null)
-    [ -n "$qx_link" ] || qx_link="$saved_link"
+    [ -n "$qx_link" ] || qx_link=""
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
         "qx_link=${qx_link}" \
