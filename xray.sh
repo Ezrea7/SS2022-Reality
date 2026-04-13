@@ -216,17 +216,6 @@ _atomic_modify_json() {
 }
 
 # -----------------------------------------------------------------------------
-# IP preference helpers
-#
-# The script supports selecting a preferred IP address family (IPv4 or IPv6)
-# when performing network operations such as public IP discovery. The chosen
-# preference is persisted in a simple configuration file within the Xray
-# configuration directory. If no preference is set, IPv4 is assumed by
-# default. These helper functions handle reading and writing this preference
-# as well as presenting a user-facing menu for changing it.
-
-# Return the currently configured IP family preference. If the preference
-# file does not exist or contains an unexpected value, "ipv4" is returned.
 _get_ip_preference() {
     local pref=""
     if [ -f "$IP_PREF_FILE" ]; then
@@ -238,8 +227,6 @@ _get_ip_preference() {
     esac
 }
 
-# Persist the given IP family preference to disk. Accepts only "ipv4" or
-# "ipv6" as valid arguments. Returns 0 on success, 1 on failure.
 _set_ip_preference() {
     local pref="$1"
     case "$pref" in
@@ -258,20 +245,11 @@ _set_ip_preference() {
 }
 
 
-# Modify the system address selection policy according to the given IP preference.
-# For IPv4, this function ensures that /etc/gai.conf contains a precedence rule
-# preferring IPv4-mapped addresses. For IPv6, it comments out that rule to
-# restore the default IPv6 priority. The function creates a backup of the
-# original gai.conf on first invocation. See ArchWiki and other references
-# explaining that uncommenting or adding the line
-# 'precedence ::ffff:0:0/96 100' forces IPv4 preference【484791851435576†L894-L902】,
-# while removing or commenting it reverts to IPv6 priority【873299726000284†L50-L58】.
+
 _apply_system_ip_preference() {
     local pref="$1"
     local gai_conf="/etc/gai.conf"
-    # Ensure the configuration file exists
     [ -f "$gai_conf" ] || touch "$gai_conf"
-    # 取消脚本内的备份文件操作，直接按当前配置原地调整。
     sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
     if [ "$pref" = "ipv4" ]; then
         # Append the IPv4 precedence rule if it is not already present
@@ -281,9 +259,6 @@ _apply_system_ip_preference() {
     fi
 }
 
-# Interactive menu allowing the user to choose between IPv4- or IPv6-first
-# behaviour for public IP detection. Displays the current preference and
-# shows the current detected IPv4 and IPv6 public addresses if available.
 _choose_ip_preference() {
     local current
     current=$(_get_ip_preference)
@@ -362,7 +337,6 @@ _choose_ip_preference() {
 
 
 _get_mem_limit() {
-    # 取消内存回收/限额机制，交由 Xray/Go 内核自行处理。
     echo 0
     return 0
 }
@@ -410,10 +384,6 @@ _input_port() {
 
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
-    # 尽量关闭运行时自带的高噪声输出，保持脚本和服务侧低日志占用。
-    # 1) Xray 配置默认使用 warning 级别；
-    # 2) systemd/openrc 服务不额外落地运行日志；
-    # 3) 若需排障，可临时调高 loglevel 或手动查看 systemd journal。
     touch "$XRAY_LOG" 2>/dev/null || true
     if [ ! -s "$XRAY_CONFIG" ]; then
         cat > "$XRAY_CONFIG" <<'JSON'
@@ -474,7 +444,6 @@ supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
-# 不保存运行日志，保持最小 IO 占用。如果需要查看日志，可使用 systemd/journal 或在配置中调整 loglevel。
 output_log="/dev/null"
 error_log="/dev/null"
 
@@ -610,8 +579,6 @@ _view_xray_log() {
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         journalctl -u xray -n 50 --no-pager -f
     elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        # 在 openrc 模式下，我们默认不持久保存日志（见 _create_xray_openrc_service），因此没有文件可供查看。
-        # 如果用户需要查看日志，可以通过修改配置中的 loglevel 并手动重定向输出。
         _warn "当前 openrc 服务未保存日志。如需查看日志，请调整服务脚本或使用其他方式获取输出。"
     else
         _warn "未检测到日志管理器。"
@@ -945,7 +912,6 @@ _xray_menu() {
         _menu_item 10 "修改节点端口"
         _menu_item 11 "更新脚本"
         _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
-        # 已移除 BBR 优化功能
         echo ""
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
@@ -974,12 +940,10 @@ _xray_menu() {
 }
 
 _maybe_handle_internal_subcommand() {
-    # Memory tuning subcommand has been removed. No internal subcommands to handle.
     return 0
 }
 
 _main() {
-    # 已移除内部子命令处理逻辑，直接执行后续步骤
     _check_root
     _detect_init_system
     _ensure_deps
