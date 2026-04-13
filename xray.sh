@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="3.1"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -18,11 +18,6 @@ XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
-
-# IP preference configuration file used to determine whether IPv4 or IPv6 should
-# be attempted first when detecting the server's public address. Possible
-# values are "ipv4" or "ipv6". If this file does not exist or contains an
-# invalid value, the default is "ipv4".
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
 
 RED='\033[0;31m'
@@ -44,17 +39,9 @@ _pause() {
     read -p "按回车键继续..." _
 }
 
-_menu_item() {
-    printf "  ${GREEN}[%-2s]${NC} %s\n" "$1" "$2"
-}
-
-_menu_danger() {
-    printf "  ${RED}[%-2s]${NC} %s\n" "$1" "$2"
-}
-
-_menu_exit() {
-    printf "  ${YELLOW}[%-2s]${NC} %s\n" "$1" "$2"
-}
+_menu_item()   { printf "  ${GREEN}[%-2s]${NC} %s\n" "$1" "$2"; }
+_menu_danger() { printf "  ${RED}[%-2s]${NC} %s\n" "$1" "$2"; }
+_menu_exit()   { printf "  ${YELLOW}[%-2s]${NC} %s\n" "$1" "$2"; }
 
 _check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -73,6 +60,17 @@ _detect_init_system() {
     fi
 }
 
+_download_to() {
+    local url="$1" output="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -LfsS "$url" -o "$output"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$url" -O "$output"
+    else
+        return 1
+    fi
+}
+
 _pkg_install() {
     [ $# -eq 0 ] && return 0
     if command -v apk >/dev/null 2>&1; then
@@ -88,24 +86,23 @@ _pkg_install() {
 }
 
 _ensure_deps() {
-    local missing still_missing c
-    missing=""
-    for c in bash jq openssl awk sed grep; do
+    local missing="" still_missing="" c
+
+    for c in bash jq openssl awk sed grep unzip; do
         command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing="$missing curl"
-    command -v unzip >/dev/null 2>&1 || missing="$missing unzip"
     command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || _pkg_install iproute2 net-tools
     if command -v apk >/dev/null 2>&1; then
         [ -f /etc/ssl/certs/ca-certificates.crt ] || missing="$missing ca-certificates"
     fi
     [ -n "$missing" ] && _pkg_install $missing
 
-    still_missing=""
     for c in bash jq openssl awk sed grep unzip; do
         command -v "$c" >/dev/null 2>&1 || still_missing="$still_missing $c"
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || still_missing="$still_missing curl"
+
     if [ -n "$still_missing" ]; then
         _error "缺少依赖: ${still_missing# }"
         return 1
@@ -118,12 +115,8 @@ _install_script_shortcut() {
     [ -n "$src" ] && [ -f "$src" ] || return 0
 
     mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null || true
-
-    if [ "$src" != "$SCRIPT_INSTALL_PATH" ]; then
-        cp -f "$src" "$SCRIPT_INSTALL_PATH" 2>/dev/null || return 0
-    fi
+    [ "$src" != "$SCRIPT_INSTALL_PATH" ] && cp -f "$src" "$SCRIPT_INSTALL_PATH" 2>/dev/null || true
     chmod +x "$SCRIPT_INSTALL_PATH" 2>/dev/null || true
-
     ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || cp -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
     chmod +x "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
 }
@@ -133,22 +126,11 @@ _update_script_self() {
     local src
     src="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
-    if command -v curl >/dev/null 2>&1; then
-        curl -LfsS "$SCRIPT_UPDATE_URL" -o "$tmp" 2>/dev/null || {
-            rm -f "$tmp"
-            _error "下载更新失败。"
-            return 1
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$SCRIPT_UPDATE_URL" -O "$tmp" 2>/dev/null || {
-            rm -f "$tmp"
-            _error "下载更新失败。"
-            return 1
-        }
-    else
-        _error "未找到 curl/wget，无法更新脚本。"
+    _download_to "$SCRIPT_UPDATE_URL" "$tmp" 2>/dev/null || {
+        rm -f "$tmp"
+        _error "下载更新失败。"
         return 1
-    fi
+    }
 
     if ! bash -n "$tmp" 2>/dev/null; then
         rm -f "$tmp"
@@ -177,30 +159,111 @@ _update_script_self() {
     _warn "请重新运行 ${SCRIPT_CMD_NAME} 或 ${SCRIPT_CMD_ALIAS} 以加载新版本。"
 }
 
+_get_ip_preference() {
+    local pref=""
+    if [ -f "$IP_PREF_FILE" ]; then
+        pref=$(tr -d '\n\r' < "$IP_PREF_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
+    fi
+    case "$pref" in
+        ipv4|ipv6) echo "$pref" ;;
+        *) echo "ipv4" ;;
+    esac
+}
+
+_apply_system_ip_preference() {
+    local pref="$1"
+    local gai_conf="/etc/gai.conf"
+    [ -f "$gai_conf" ] || touch "$gai_conf"
+    sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
+    if [ "$pref" = "ipv4" ] && ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' "$gai_conf"; then
+        echo 'precedence ::ffff:0:0/96 100' >> "$gai_conf"
+    fi
+}
+
+_set_ip_preference() {
+    local pref="$1"
+    case "$pref" in
+        ipv4|ipv6)
+            mkdir -p "$XRAY_DIR" 2>/dev/null || true
+            echo "$pref" > "$IP_PREF_FILE" 2>/dev/null || return 1
+            _apply_system_ip_preference "$pref"
+            unset server_ip
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_fetch_ip_by_proto() {
+    local proto="$1" ip=""
+
+    if command -v curl >/dev/null 2>&1; then
+        if [ "$proto" = "ipv6" ]; then
+            ip=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null || true)
+        else
+            ip=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null || curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
+        fi
+    fi
+
+    if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
+        if [ "$proto" = "ipv6" ]; then
+            ip=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null || true)
+        else
+            ip=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null || true)
+        fi
+    fi
+
+    printf '%s' "$ip"
+}
+
 _get_public_ip() {
     [ -n "$server_ip" ] && { echo "$server_ip"; return; }
-    local ip="" pref
+
+    local pref ip=""
     pref=$(_get_ip_preference)
-    if command -v curl >/dev/null 2>&1; then
-        if [ "$pref" = "ipv6" ]; then
-            ip=$(curl -s6 --max-time 3 api6.ipify.org 2>/dev/null || curl -s6 --max-time 3 icanhazip.com 2>/dev/null)
-            [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 api.ipify.org 2>/dev/null || curl -s4 --max-time 3 icanhazip.com 2>/dev/null)
-        else
-            ip=$(curl -s4 --max-time 3 api.ipify.org 2>/dev/null || curl -s4 --max-time 3 icanhazip.com 2>/dev/null)
-            [ -z "$ip" ] && ip=$(curl -s6 --max-time 3 api6.ipify.org 2>/dev/null || curl -s6 --max-time 3 icanhazip.com 2>/dev/null)
-        fi
+
+    if [ "$pref" = "ipv6" ]; then
+        ip=$(_fetch_ip_by_proto ipv6)
+        [ -z "$ip" ] && ip=$(_fetch_ip_by_proto ipv4)
+    else
+        ip=$(_fetch_ip_by_proto ipv4)
+        [ -z "$ip" ] && ip=$(_fetch_ip_by_proto ipv6)
     fi
-    if [ -z "$ip" ] && command -v wget >/dev/null 2>&1; then
-        if [ "$pref" = "ipv6" ]; then
-            ip=$(wget -qO- -6 --timeout=3 api6.ipify.org 2>/dev/null || wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -4 --timeout=3 api.ipify.org 2>/dev/null || wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null)
-        else
-            ip=$(wget -qO- -4 --timeout=3 api.ipify.org 2>/dev/null || wget -qO- -4 --timeout=3 icanhazip.com 2>/dev/null)
-            [ -z "$ip" ] && ip=$(wget -qO- -6 --timeout=3 api6.ipify.org 2>/dev/null || wget -qO- -6 --timeout=3 icanhazip.com 2>/dev/null)
-        fi
-    fi
+
     server_ip="$ip"
     echo "$ip"
+}
+
+_choose_ip_preference() {
+    local current ip4 ip6 display_pref choice
+    current=$(_get_ip_preference)
+    ip4=$(_fetch_ip_by_proto ipv4)
+    ip6=$(_fetch_ip_by_proto ipv6)
+    [ "$current" = "ipv6" ] && display_pref="IPv6" || display_pref="IPv4"
+
+    echo ""
+    echo -e "${CYAN}当前网络优先级设置: ${NC}${GREEN}${display_pref} 优先${NC}"
+    echo ""
+    echo -e "检测到 IPv4 地址: ${YELLOW}${ip4:-无}${NC}"
+    echo -e "检测到 IPv6 地址: ${YELLOW}${ip6:-无}${NC}"
+    echo ""
+    echo "请选择网络优先级:"
+    echo -e "  ${GREEN}[1]${NC} IPv4 优先"
+    echo -e "  ${GREEN}[2]${NC} IPv6 优先"
+    echo -e "  ${YELLOW}[0]${NC} 返回上一级"
+    read -p "请选择 [0-2]: " choice
+
+    case "$choice" in
+        1) _set_ip_preference ipv4 && _success "已设置 IPv4 优先。" || _error "设置 IPv4 优先失败。" ;;
+        2) _set_ip_preference ipv6 && _success "已设置 IPv6 优先。" || _error "设置 IPv6 优先失败。" ;;
+        0) return 0 ;;
+        *) _error "无效输入。" ;;
+    esac
+    _pause
+}
+
+_get_mem_limit() {
+    echo 0
+    return 0
 }
 
 _atomic_modify_json() {
@@ -214,133 +277,6 @@ _atomic_modify_json() {
         return 1
     fi
 }
-
-# -----------------------------------------------------------------------------
-_get_ip_preference() {
-    local pref=""
-    if [ -f "$IP_PREF_FILE" ]; then
-        pref=$(tr -d '\n\r' < "$IP_PREF_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
-    fi
-    case "$pref" in
-        ipv4|ipv6) echo "$pref" ;;
-        *) echo "ipv4" ;;
-    esac
-}
-
-_set_ip_preference() {
-    local pref="$1"
-    case "$pref" in
-        ipv4|ipv6)
-            mkdir -p "$XRAY_DIR" 2>/dev/null || true
-            echo "$pref" > "$IP_PREF_FILE" 2>/dev/null || return 1
-            # Apply system-wide gai.conf preference and clear cached IP.
-            _apply_system_ip_preference "$pref"
-            unset server_ip
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-
-
-_apply_system_ip_preference() {
-    local pref="$1"
-    local gai_conf="/etc/gai.conf"
-    [ -f "$gai_conf" ] || touch "$gai_conf"
-    sed -i -e "/^[[:space:]]*precedence[[:space:]]\+::ffff:0:0\/96/ s/^/#/" "$gai_conf"
-    if [ "$pref" = "ipv4" ]; then
-        # Append the IPv4 precedence rule if it is not already present
-        if ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' "$gai_conf"; then
-            echo 'precedence ::ffff:0:0/96 100' >> "$gai_conf"
-        fi
-    fi
-}
-
-_choose_ip_preference() {
-    local current
-    current=$(_get_ip_preference)
-    # Detect current IPv4 and IPv6 addresses separately.
-    local ip4="" ip6=""
-    # Attempt detection using curl
-    if command -v curl >/dev/null 2>&1; then
-        # IPv4: try multiple services, fall back to api.ipify.org
-        ip4=$(curl -s4 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s4 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s4 --max-time 5 api.ipify.org 2>/dev/null || true)
-        # IPv6: try multiple services, fall back to api6.ipify.org
-        ip6=$(curl -s6 --max-time 5 icanhazip.com 2>/dev/null \
-               || curl -s6 --max-time 5 ipinfo.io/ip 2>/dev/null \
-               || curl -s6 --max-time 5 api6.ipify.org 2>/dev/null || true)
-    fi
-    # Attempt detection using wget if either is missing
-    if command -v wget >/dev/null 2>&1; then
-        if [ -z "$ip4" ]; then
-            ip4=$(wget -qO- -4 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -4 --timeout=5 api.ipify.org 2>/dev/null || true)
-        fi
-        if [ -z "$ip6" ]; then
-            ip6=$(wget -qO- -6 --timeout=5 icanhazip.com 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 ipinfo.io/ip 2>/dev/null \
-                   || wget -qO- -6 --timeout=5 api6.ipify.org 2>/dev/null || true)
-        fi
-    fi
-    echo ""
-    # Display the current preference using proper casing (IPv4/IPv6)
-    local display_pref
-    if [ "$current" = "ipv6" ]; then
-        display_pref="IPv6"
-    else
-        display_pref="IPv4"
-    fi
-    echo -e "${CYAN}当前网络优先级设置: ${NC}${GREEN}${display_pref} 优先${NC}"
-    echo ""
-    # Display detected IP addresses; show '无' if not found
-    echo -e "检测到 IPv4 地址: ${YELLOW}${ip4:-无}${NC}"
-    echo -e "检测到 IPv6 地址: ${YELLOW}${ip6:-无}${NC}"
-    echo ""
-    echo "请选择网络优先级:"
-    echo -e "  ${GREEN}[1]${NC} IPv4 优先"
-    echo -e "  ${GREEN}[2]${NC} IPv6 优先"
-    echo -e "  ${YELLOW}[0]${NC} 返回上一级"
-    read -p "请选择 [0-2]: " choice
-    case "$choice" in
-        1)
-            if _set_ip_preference ipv4; then
-                _success "已设置 IPv4 优先。"
-            else
-                _error "设置 IPv4 优先失败。"
-            fi
-            ;;
-        2)
-            if _set_ip_preference ipv6; then
-                _success "已设置 IPv6 优先。"
-            else
-                _error "设置 IPv6 优先失败。"
-            fi
-            ;;
-        0)
-            return 0
-            ;;
-        *)
-            _error "无效输入。"
-            ;;
-    esac
-    _pause
-}
-
-
-
-
-
-_get_mem_limit() {
-    echo 0
-    return 0
-}
-
 
 _check_port_occupied() {
     local port="$1"
@@ -377,14 +313,15 @@ _input_port() {
             continue
         fi
         _check_xray_port_conflict "$port" && continue
-        break
+        echo "$port"
+        return 0
     done
-    echo "$port"
 }
 
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
     touch "$XRAY_LOG" 2>/dev/null || true
+
     if [ ! -s "$XRAY_CONFIG" ]; then
         cat > "$XRAY_CONFIG" <<'JSON'
 {
@@ -409,9 +346,9 @@ _init_xray_config() {
 JSON
         _success "Xray 配置文件已初始化。"
     fi
+
     [ -s "$XRAY_METADATA" ] || echo '{}' > "$XRAY_METADATA"
 }
-
 
 _create_xray_systemd_service() {
     cat > /etc/systemd/system/xray.service <<EOF2
@@ -456,98 +393,68 @@ EOF2
     rc-update add xray default >/dev/null 2>&1 || true
 }
 
-
 _create_xray_service() {
     case "$INIT_SYSTEM" in
         systemd) _create_xray_systemd_service ;;
-        openrc)  _create_xray_openrc_service ;;
+        openrc) _create_xray_openrc_service ;;
         *) _warn "未检测到 systemd/openrc，请手动管理 Xray 进程。" ;;
     esac
 }
 
 _manage_xray_service() {
-    local action="$1"
+    local action="$1" result=1
     case "$INIT_SYSTEM" in
-        systemd)
-            if [ "$action" = "status" ]; then
-                if systemctl is-active --quiet xray >/dev/null 2>&1; then
-                    _success "Xray 服务运行中。"
-                else
-                    _warn "Xray 服务已停止。"
-                fi
-                return
-            fi
-            if systemctl "$action" xray >/dev/null 2>&1; then
-                case "$action" in
-                    start) _success "Xray 服务已启动。" ;;
-                    stop) _success "Xray 服务已停止。" ;;
-                    restart) _success "Xray 服务已重启。" ;;
-                esac
-            else
-                _error "Xray 服务${action}失败。"
-                return 1
-            fi
-            ;;
-        openrc)
-            if [ "$action" = "status" ]; then
-                if rc-service xray status >/dev/null 2>&1; then
-                    _success "Xray 服务运行中。"
-                else
-                    _warn "Xray 服务已停止。"
-                fi
-                return
-            fi
-            if rc-service xray "$action" >/dev/null 2>&1; then
-                case "$action" in
-                    start) _success "Xray 服务已启动。" ;;
-                    stop) _success "Xray 服务已停止。" ;;
-                    restart) _success "Xray 服务已重启。" ;;
-                esac
-            else
-                _error "Xray 服务${action}失败。"
-                return 1
-            fi
-            ;;
-        *)
-            _warn "未检测到服务管理器，跳过 ${action}。"
-            ;;
+        systemd) systemctl "$action" xray >/dev/null 2>&1; result=$? ;;
+        openrc) rc-service xray "$action" >/dev/null 2>&1; result=$? ;;
+        *) _warn "未检测到服务管理器，跳过 ${action}。"; return 0 ;;
+    esac
+
+    [ "$result" -eq 0 ] || { _error "Xray 服务${action}失败。"; return 1; }
+
+    case "$action" in
+        start) _success "Xray 服务已启动。" ;;
+        stop) _success "Xray 服务已停止。" ;;
+        restart) _success "Xray 服务已重启。" ;;
     esac
 }
+
 _install_or_update_xray() {
-    local is_first_install=false
+    local is_first_install=false current_ver arch xray_arch download_url tmp_dir tmp_zip version
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
 
     if [ "$is_first_install" = true ]; then
         _info "Xray 核心未安装，正在执行首次安装..."
     else
-        local current_ver
         current_ver=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
         _info "当前 Xray 版本: v${current_ver}，正在检查更新..."
     fi
 
     command -v unzip >/dev/null 2>&1 || _pkg_install unzip
 
-    local arch=$(uname -m)
-    local xray_arch="64"
+    arch=$(uname -m)
+    xray_arch="64"
     case "$arch" in
-        x86_64|amd64)  xray_arch="64" ;;
+        x86_64|amd64) xray_arch="64" ;;
         aarch64|arm64) xray_arch="arm64-v8a" ;;
-        armv7l)        xray_arch="arm32-v7a" ;;
+        armv7l) xray_arch="arm32-v7a" ;;
     esac
 
-    local download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
-    local tmp_dir
+    download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
     tmp_dir=$(mktemp -d)
-    local tmp_zip="${tmp_dir}/xray.zip"
+    tmp_zip="${tmp_dir}/xray.zip"
 
     _info "下载地址: ${download_url}"
-    if command -v curl >/dev/null 2>&1; then
-        curl -LfsS "$download_url" -o "$tmp_zip" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; return 1; }
-    else
-        wget -qO "$tmp_zip" "$download_url" || { _error "Xray 下载失败。"; rm -rf "$tmp_dir"; return 1; }
-    fi
+    _download_to "$download_url" "$tmp_zip" || {
+        _error "Xray 下载失败。"
+        rm -rf "$tmp_dir"
+        return 1
+    }
 
-    unzip -qo "$tmp_zip" -d "$tmp_dir" || { _error "Xray 解压失败。"; rm -rf "$tmp_dir"; return 1; }
+    unzip -qo "$tmp_zip" -d "$tmp_dir" || {
+        _error "Xray 解压失败。"
+        rm -rf "$tmp_dir"
+        return 1
+    }
 
     mv "${tmp_dir}/xray" "$XRAY_BIN"
     chmod +x "$XRAY_BIN"
@@ -556,32 +463,19 @@ _install_or_update_xray() {
     [ -f "${tmp_dir}/geosite.dat" ] && mv "${tmp_dir}/geosite.dat" "$XRAY_DIR/"
     rm -rf "$tmp_dir"
 
-    local version
     version=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
     _success "Xray-core v${version} 安装/更新成功。"
 
+    _init_xray_config
+    _create_xray_service
+
     if [ "$is_first_install" = true ]; then
         _info "首次安装 Xray，正在初始化配置与服务..."
-        _init_xray_config
-        # Default to IPv4 priority on first installation; ignore errors.
         _set_ip_preference ipv4 >/dev/null 2>&1 || true
-        _create_xray_service
         _manage_xray_service start
         _success "Xray 首次安装完成并已启动。"
     else
-        _init_xray_config
-        _create_xray_service
         _manage_xray_service restart
-    fi
-}
-
-_view_xray_log() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        journalctl -u xray -n 50 --no-pager -f
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        _warn "当前 openrc 服务未保存日志。如需查看日志，请调整服务脚本或使用其他方式获取输出。"
-    else
-        _warn "未检测到日志管理器。"
     fi
 }
 
@@ -591,6 +485,7 @@ _generate_reality_keys() {
     REALITY_PRIVATE_KEY=$(echo "$keypair" | awk 'NR==1 {print $NF}')
     REALITY_PUBLIC_KEY=$(echo "$keypair" | awk 'NR==2 {print $NF}')
     REALITY_SHORT_ID=$(openssl rand -hex 8)
+
     if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
         _error "Reality 密钥生成失败。"
         echo "$keypair" >&2
@@ -618,21 +513,59 @@ _build_reality_stream() {
 _save_xray_meta() {
     local tag="$1" name="$2" link="$3"
     shift 3
+
     local tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg t "$tag" --arg n "$name" --arg l "$link" '. + {($t): {name: $n, share_link: $l}}' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || { rm -f "$tmp"; return 1; }
+    jq --arg t "$tag" --arg n "$name" --arg l "$link" '. + {($t): {name: $n, share_link: $l}}' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
+        rm -f "$tmp"
+        return 1
+    }
+
     for pair in "$@"; do
         local key="${pair%%=*}"
         local val="${pair#*=}"
         [ -n "$key" ] && [ -n "$val" ] || continue
-        local tmp2="${XRAY_METADATA}.tmp.$$"
-        jq --arg t "$tag" --arg k "$key" --arg v "$val" '.[$t][$k] = $v' "$XRAY_METADATA" > "$tmp2" 2>/dev/null && mv "$tmp2" "$XRAY_METADATA" || rm -f "$tmp2"
+        tmp="${XRAY_METADATA}.tmp.$$"
+        jq --arg t "$tag" --arg k "$key" --arg v "$val" '.[$t][$k] = $v' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
     done
+}
+
+_list_xray_tags() {
+    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+}
+
+_select_xray_tag() {
+    local prompt="$1"
+    local -a tags
+    mapfile -t tags < <(_list_xray_tags)
+    [ "${#tags[@]}" -gt 0 ] || return 1
+
+    echo ""
+    echo -e "${YELLOW}${prompt}${NC}"
+    for i in "${!tags[@]}"; do
+        local tag="${tags[$i]}" port name
+        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
+        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
+    done
+    echo -e "  ${RED}[0]${NC} 返回"
+    echo ""
+    read -p "请选择 [0-${#tags[@]}]: " choice
+
+    [ "$choice" = "0" ] && return 1
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
+        _error "无效选择。"
+        return 1
+    fi
+
+    echo "${tags[$((choice-1))]}"
 }
 
 _add_ss2022_reality() {
     [ ! -f "$XRAY_BIN" ] && { _error "请先安装/更新 Xray 核心。"; return 1; }
     [ -z "$server_ip" ] && server_ip=$(_get_public_ip)
-    local node_ip="$server_ip"
+
+    local node_ip custom_ip port sni custom_sni default_name custom_name name tag method password link_ip stream inbound qx_link
+    node_ip="$server_ip"
 
     if [ -n "$server_ip" ]; then
         read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
@@ -642,18 +575,16 @@ _add_ss2022_reality() {
         read -p "请输入服务器 IP: " node_ip
     fi
 
-    local port
     port=$(_input_port)
-
-    local sni="$DEFAULT_SNI"
+    sni="$DEFAULT_SNI"
     read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
     sni=${custom_sni:-$DEFAULT_SNI}
 
-    local default_name="SS2022-REALITY-${port}"
+    default_name="SS2022-REALITY-${port}"
     while true; do
         read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        local name=${custom_name:-$default_name}
-        local tag="$name"
+        name=${custom_name:-$default_name}
+        tag="$name"
         if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
             _error "节点名称已存在，请重新输入。"
             continue
@@ -661,17 +592,15 @@ _add_ss2022_reality() {
         break
     done
 
-    local method="2022-blake3-aes-128-gcm"
-    local password
+    method="2022-blake3-aes-128-gcm"
     password=$(openssl rand -base64 16)
     _generate_reality_keys || return 1
 
-    local tag="$name"
-    local link_ip="$node_ip"; [[ "$node_ip" == *":"* ]] && link_ip="[$node_ip]"
+    tag="$name"
+    link_ip="$node_ip"
+    [[ "$node_ip" == *":"* ]] && link_ip="[$node_ip]"
 
-    local stream
     stream=$(_build_reality_stream "raw" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
-    local inbound
     inbound=$(jq -n --arg tag "$tag" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson stream "$stream" '
         {
             "tag": $tag,
@@ -688,7 +617,7 @@ _add_ss2022_reality() {
 
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
 
-    local qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${tag}"
+    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${tag}"
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
         "publicKey=${REALITY_PUBLIC_KEY}" \
@@ -709,14 +638,12 @@ _view_xray_nodes() {
         _warn "当前没有 Xray 节点。"
         return
     fi
+
     echo ""
     echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
-    local count=0
-    local -a tags
-    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
-    for tag in "${tags[@]}"; do
+    local count=0 tag protocol port network security name link
+    while IFS= read -r tag; do
         count=$((count + 1))
-        local port protocol name security network link
         protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol' "$XRAY_CONFIG")
         port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
         network=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.network // "raw"' "$XRAY_CONFIG")
@@ -727,7 +654,7 @@ _view_xray_nodes() {
         echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
         echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
         [ -n "$link" ] && echo -e "      ${YELLOW}Quantumult X:${NC} ${link}"
-    done
+    done < <(_list_xray_tags)
 }
 
 _delete_xray_node() {
@@ -735,30 +662,13 @@ _delete_xray_node() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local -a tags
-    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
-    echo ""
-    echo -e "${YELLOW}══════════ 选择要删除的节点 ══════════${NC}"
-    for i in "${!tags[@]}"; do
-        local tag="${tags[$i]}"
-        local port name
-        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
-        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
-        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
-    done
-    echo -e "  ${RED}[0]${NC} 返回"
-    echo ""
-    read -p "请选择 [0-${#tags[@]}]: " choice
-    [ "$choice" = "0" ] && return
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
-        _error "无效选择。"
-        return
-    fi
-    local target_tag="${tags[$((choice-1))]}"
-    local target_name
+
+    local target_tag target_name
+    target_tag=$(_select_xray_tag "══════════ 选择要删除的节点 ══════════") || return
     target_name=$(jq -r ".\"$target_tag\".name // \"$target_tag\"" "$XRAY_METADATA" 2>/dev/null)
     read -p "确定删除 [${target_name}]? (y/N): " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "已取消。"; return; }
+
     _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$target_tag\"))" || return 1
     _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
     _manage_xray_service restart
@@ -770,48 +680,32 @@ _modify_xray_port() {
         _warn "当前没有 Xray 节点。"
         return
     fi
-    local -a tags
-    mapfile -t tags < <(jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null)
-    echo ""
-    echo -e "${YELLOW}══════════ 选择要修改端口的节点 ══════════${NC}"
-    for i in "${!tags[@]}"; do
-        local tag="${tags[$i]}"
-        local port name
-        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
-        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
-        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})"
-    done
-    echo -e "  ${RED}[0]${NC} 返回"
-    echo ""
-    read -p "请选择 [0-${#tags[@]}]: " choice
-    [ "$choice" = "0" ] && return
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
-        _error "无效选择。"
-        return
-    fi
-    local target_tag="${tags[$((choice-1))]}"
-    local old_port target_name
+
+    local target_tag old_port target_name new_port new_tag new_name old_link new_link tmp
+    target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
     old_port=$(jq -r ".inbounds[] | select(.tag == \"$target_tag\") | .port" "$XRAY_CONFIG")
     target_name=$(jq -r ".\"$target_tag\".name // \"$target_tag\"" "$XRAY_METADATA" 2>/dev/null)
+
     _info "当前端口: ${old_port}"
-    local new_port
     new_port=$(_input_port)
-    local new_tag new_name
     new_tag=$(echo "$target_tag" | sed "s/${old_port}/${new_port}/g")
     new_name=$(echo "$target_name" | sed "s/${old_port}/${new_port}/g")
+
     _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$target_tag\") | .port) = $new_port" || return 1
     _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$target_tag\") | .tag) = \"$new_tag\"" || return 1
-    local old_link new_link
+
     old_link=$(jq -r ".\"$target_tag\".share_link // empty" "$XRAY_METADATA" 2>/dev/null)
     new_link=$(echo "$old_link" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g")
-    local tmp="${XRAY_METADATA}.tmp.$$"
+    tmp="${XRAY_METADATA}.tmp.$$"
     jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): (.[$ot] + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+
     _manage_xray_service restart
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
 }
 
 _remove_xray_runtime() {
     _manage_xray_service stop >/dev/null 2>&1 || true
+
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl disable xray >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xray.service
@@ -821,6 +715,7 @@ _remove_xray_runtime() {
         rc-update del xray default >/dev/null 2>&1 || true
         rm -f /etc/init.d/xray
     fi
+
     rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
 }
@@ -848,8 +743,9 @@ _uninstall_script() {
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
     echo ""
 
-    read -p "$(echo -e ${YELLOW}"确定要执行卸载吗? (y/N): "${NC})" confirm_main "$@"
-    [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && _info "卸载已取消。" && return
+    printf "${YELLOW}确定要执行卸载吗? (y/N): ${NC}"
+    read -r confirm_main
+    [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && { _info "卸载已取消。"; return; }
 
     _info "正在停止并清理 Xray ..."
     _remove_xray_runtime
@@ -865,82 +761,51 @@ _uninstall_script() {
     exit 0
 }
 
-_show_status_header() {
-    local xray_status="${RED}未安装${NC}"
-    local xray_ver=""
-    if [ -f "$XRAY_BIN" ]; then
-        xray_ver=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
-        if [ "$INIT_SYSTEM" = "systemd" ]; then
-            systemctl is-active xray >/dev/null 2>&1 && xray_status="${GREEN}● 运行中${NC}" || xray_status="${YELLOW}○ 已停止${NC}"
-        elif [ "$INIT_SYSTEM" = "openrc" ]; then
-            rc-service xray status >/dev/null 2>&1 && xray_status="${GREEN}● 运行中${NC}" || xray_status="${YELLOW}○ 已停止${NC}"
-        else
-            xray_status="${YELLOW}○ 未知${NC}"
-        fi
-    fi
-    local node_count
-    node_count=$(jq '.inbounds | length' "$XRAY_CONFIG" 2>/dev/null || echo 0)
-    echo -e "=================================================="
-    echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
-    echo -e " 单协议: SS2022 + Reality"
-    echo -e "=================================================="
-    if [ -n "$xray_ver" ]; then
-        echo -e " Xray v${xray_ver}: ${xray_status} (${node_count}节点)"
-    else
-        echo -e " Xray: ${xray_status} (${node_count}节点)"
-    fi
-    echo -e "--------------------------------------------------"
-}
-
 _xray_menu() {
     while true; do
         clear
         echo ""
-        _show_status_header
+        echo -e "=================================================="
+        echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
+        echo -e " 单协议: SS2022 + Reality"
+        echo -e "=================================================="
         echo -e " ${CYAN}【服务控制】${NC}"
         _menu_item 1  "安装/更新 Xray 内核"
         _menu_item 2  "启动 Xray"
         _menu_item 3  "停止 Xray"
         _menu_item 4  "重启 Xray"
-        _menu_item 5  "查看 Xray 状态"
-        _menu_item 6  "查看 Xray 日志"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        _menu_item 7  "添加 SS2022+Reality 节点"
-        _menu_item 8  "查看所有节点"
-        _menu_item 9  "删除节点"
-        _menu_item 10 "修改节点端口"
-        _menu_item 11 "更新脚本"
-        _menu_item 12 "设置网络优先级 (IPv4/IPv6)"
+        _menu_item 5  "添加 SS2022+Reality 节点"
+        _menu_item 6  "查看所有节点"
+        _menu_item 7  "删除节点"
+        _menu_item 8  "修改节点端口"
+        _menu_item 9  "更新脚本"
+        _menu_item 10 "设置网络优先级 (IPv4/IPv6)"
         echo ""
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
         _menu_exit 0 "退出脚本"
         echo -e "=================================================="
         read -p "请选择 [0-99]: " choice
+
         case "$choice" in
             1) _install_or_update_xray; _pause ;;
             2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
             3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
             4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            5) [ -f "$XRAY_BIN" ] && _manage_xray_service status; _pause ;;
-            6) [ -f "$XRAY_BIN" ] && _view_xray_log ;;
-            7) _init_xray_config; _add_ss2022_reality; _pause ;;
-            8) _view_xray_nodes; _pause ;;
-            9) _delete_xray_node; _pause ;;
-            10) _modify_xray_port; _pause ;;
-            11) _update_script_self; _pause; exit 0 ;;
-            12) _choose_ip_preference ;;
+            5) _init_xray_config; _add_ss2022_reality; _pause ;;
+            6) _view_xray_nodes; _pause ;;
+            7) _delete_xray_node; _pause ;;
+            8) _modify_xray_port; _pause ;;
+            9) _update_script_self; _pause; exit 0 ;;
+            10) _choose_ip_preference ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
             *) _error "无效输入。"; _pause ;;
         esac
     done
-}
-
-_maybe_handle_internal_subcommand() {
-    return 0
 }
 
 _main() {
