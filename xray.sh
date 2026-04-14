@@ -72,16 +72,22 @@ _download_to() {
 }
 
 _pkg_install() {
-    [ $# -eq 0 ] && return 0
+    local pkgs="$*"
+    [ -z "$pkgs" ] && return 0
     if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache "$@" >/dev/null 2>&1
+        apk add --no-cache $pkgs >/dev/null 2>&1
     elif command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null 2>&1
+        if [ ! -d "/var/lib/apt/lists" ] || [ "$(ls -A /var/lib/apt/lists/ 2>/dev/null | wc -l)" -le 1 ]; then
+            apt-get update -qq >/dev/null 2>&1
+        fi
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs >/dev/null 2>&1 || {
+            apt-get update -qq >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs >/dev/null 2>&1
+        }
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y "$@" >/dev/null 2>&1
+        dnf install -y $pkgs >/dev/null 2>&1
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y "$@" >/dev/null 2>&1
+        yum install -y $pkgs >/dev/null 2>&1
     fi
 }
 
@@ -102,6 +108,7 @@ _ensure_deps() {
         command -v "$c" >/dev/null 2>&1 || still_missing="$still_missing $c"
     done
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || still_missing="$still_missing curl"
+    command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || still_missing="$still_missing iproute2/net-tools"
 
     if [ -n "$still_missing" ]; then
         _error "缺少依赖: ${still_missing# }"
@@ -259,6 +266,17 @@ _choose_ip_preference() {
         *) _error "无效输入。" ;;
     esac
     _pause
+}
+
+_init_server_ip() {
+    _info "正在获取服务器公网 IP..."
+    server_ip=$(_get_public_ip)
+    if [ -z "$server_ip" ] || [ "$server_ip" = "null" ]; then
+        _warn "自动获取 IP 失败，请添加节点时手动输入。"
+        server_ip=""
+    else
+        _success "当前服务器公网 IP: ${server_ip}"
+    fi
 }
 
 _get_mem_limit() {
@@ -914,30 +932,29 @@ _modify_xray_port() {
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
 }
 
-_remove_xray_runtime() {
+_uninstall_xray() {
+    echo ""
+    _warn "即将卸载 Xray 核心及其所有配置！"
+    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
+    read -r confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "卸载已取消。"; return; }
+
     _manage_xray_service stop >/dev/null 2>&1 || true
 
     if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable xray >/dev/null 2>&1 || true
+        systemctl disable xray >/dev/null 2>&1
         rm -f /etc/systemd/system/xray.service
         systemctl daemon-reload >/dev/null 2>&1 || true
     elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-service xray stop >/dev/null 2>&1 || true
-        rc-update del xray default >/dev/null 2>&1 || true
+        rc-update del xray default >/dev/null 2>&1
         rm -f /etc/init.d/xray
     fi
 
-    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
+    rm -f "$XRAY_BIN"
     rm -rf "$XRAY_DIR"
-}
+    rm -f "$XRAY_LOG" "$XRAY_PID_FILE"
 
-_uninstall_xray() {
-    echo ""
-    _warn "即将卸载 Xray 核心及其全部配置，保留管理脚本。"
-    read -p "确定要卸载吗? (输入 yes 确认): " confirm
-    [ "$confirm" = "yes" ] || { _info "卸载已取消。"; return; }
-    _remove_xray_runtime
-    _success "Xray 已完全卸载，管理脚本仍可继续使用。"
+    _success "Xray 核心已完全卸载！"
 }
 
 _uninstall_script() {
@@ -958,8 +975,20 @@ _uninstall_script() {
     read -r confirm_main
     [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && { _info "卸载已取消。"; return; }
 
-    _info "正在停止并清理 Xray ..."
-    _remove_xray_runtime
+    _manage_xray_service stop >/dev/null 2>&1 || true
+
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable xray >/dev/null 2>&1
+        rm -f /etc/systemd/system/xray.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-update del xray default >/dev/null 2>&1
+        rm -f /etc/init.d/xray
+    fi
+
+    rm -f "$XRAY_BIN"
+    rm -rf "$XRAY_DIR"
+    rm -f "$XRAY_LOG" "$XRAY_PID_FILE"
 
     _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
@@ -1025,6 +1054,7 @@ _main() {
     _detect_init_system
     _ensure_deps
     _install_script_shortcut
+    _init_server_ip
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
