@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -698,11 +698,12 @@ _save_xray_meta() {
     local tag="$1" name="$2" link="$3"
     shift 3
 
-    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", share_link: \"$link\"}}" || return 1
+    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", qx_link: \"$link\"}}" || return 1
 
     for pair in "$@"; do
         local key="${pair%%=*}" val="${pair#*=}"
         [ -n "$key" ] && [ -n "$val" ] || continue
+        [ "$key" = "share_link" ] && continue
         _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$val\"" >/dev/null 2>&1 || true
     done
 }
@@ -821,7 +822,6 @@ _add_ss2022_reality() {
     qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
-        "qx_link=${qx_link}" \
         "password=${password}" \
         "publicKey=${REALITY_PUBLIC_KEY}" \
         "shortId=${REALITY_SHORT_ID}" \
