@@ -778,7 +778,7 @@ _add_ss2022_reality() {
           "listen_port": $port,
           "method": $method,
           "password": $password,
-          "network": "tcp,udp",
+          "network": "tcp",
           "tls": {
             "enabled": true,
             "server_name": $sni,
