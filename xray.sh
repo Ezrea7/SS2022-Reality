@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -268,12 +268,13 @@ _get_mem_limit() {
 
 _atomic_modify_json() {
     local file="$1" filter="$2"
+    [ -f "$file" ] || { _error "文件不存在: $file"; return 1; }
     local tmp="${file}.tmp.$$"
     if jq "$filter" "$file" > "$tmp" 2>/dev/null; then
         mv "$tmp" "$file"
     else
         rm -f "$tmp"
-        _error "JSON 修改失败。"
+        _error "JSON 修改失败: $file"
         return 1
     fi
 }
@@ -454,10 +455,33 @@ _show_xray_runtime_summary() {
 
 _manage_xray_service() {
     local action="$1" result=1
+
+    [ -x "$XRAY_BIN" ] || { _error "Xray 内核未安装。"; return 1; }
+    [ -z "$INIT_SYSTEM" ] && _detect_init_system
+
+    [ "$action" = "status" ] || _info "正在使用 ${INIT_SYSTEM} 执行: ${action}..."
+
     case "$INIT_SYSTEM" in
-        systemd) systemctl "$action" xray >/dev/null 2>&1; result=$? ;;
-        openrc) rc-service xray "$action" >/dev/null 2>&1; result=$? ;;
-        *) _warn "未检测到服务管理器，跳过 ${action}。"; return 0 ;;
+        systemd)
+            if [ "$action" = "status" ]; then
+                systemctl status xray --no-pager -l
+                return
+            fi
+            systemctl "$action" xray >/dev/null 2>&1
+            result=$?
+            ;;
+        openrc)
+            if [ "$action" = "status" ]; then
+                rc-service xray status
+                return
+            fi
+            rc-service xray "$action" >/dev/null 2>&1
+            result=$?
+            ;;
+        *)
+            _warn "未检测到服务管理器，跳过 ${action}。"
+            return 0
+            ;;
     esac
 
     [ "$result" -eq 0 ] || { _error "Xray 服务${action}失败。"; return 1; }
@@ -470,7 +494,7 @@ _manage_xray_service() {
 }
 
 _install_or_update_xray() {
-    local is_first_install=false current_ver arch xray_arch download_url tmp_dir tmp_zip version
+    local is_first_install=false current_ver arch xray_arch download_url dgst_url tmp_dir tmp_zip version dgst_content expected_hash actual_hash
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
 
     if [ "$is_first_install" = true ]; then
@@ -481,6 +505,7 @@ _install_or_update_xray() {
     fi
 
     command -v unzip >/dev/null 2>&1 || _pkg_install unzip
+    command -v sha256sum >/dev/null 2>&1 || _pkg_install coreutils
 
     arch=$(uname -m)
     xray_arch="64"
@@ -491,6 +516,7 @@ _install_or_update_xray() {
     esac
 
     download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
+    dgst_url="${download_url}.dgst"
     tmp_dir=$(mktemp -d)
     tmp_zip="${tmp_dir}/xray.zip"
 
@@ -501,11 +527,31 @@ _install_or_update_xray() {
         return 1
     }
 
+    dgst_content=$(_download_to "$dgst_url" "${tmp_dir}/xray.zip.dgst" >/dev/null 2>&1 && cat "${tmp_dir}/xray.zip.dgst" 2>/dev/null)
+    if [ -n "$dgst_content" ] && command -v sha256sum >/dev/null 2>&1; then
+        _info "正在进行 SHA256 完整性校验..."
+        expected_hash=$(printf '%s\n' "$dgst_content" | grep "SHA2-256" | head -1 | awk -F'= ' '{print $2}' | tr -d '[:space:]')
+        if [ -n "$expected_hash" ]; then
+            actual_hash=$(sha256sum "$tmp_zip" | awk '{print $1}')
+            if [ "$(printf '%s' "$expected_hash" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$actual_hash" | tr 'A-Z' 'a-z')" ]; then
+                _error "SHA256 校验失败，已取消安装。"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            _success "SHA256 校验通过。"
+        else
+            _warn "校验文件格式异常，跳过校验。"
+        fi
+    else
+        _warn "未获取到校验文件，跳过 SHA256 校验。"
+    fi
+
     unzip -qo "$tmp_zip" -d "$tmp_dir" || {
         _error "Xray 解压失败。"
         rm -rf "$tmp_dir"
         return 1
     }
+    [ -f "${tmp_dir}/xray" ] || { _error "压缩包中未找到 xray 二进制。"; rm -rf "$tmp_dir"; return 1; }
 
     mv "${tmp_dir}/xray" "$XRAY_BIN"
     chmod +x "$XRAY_BIN"
@@ -579,6 +625,16 @@ _get_xray_share_link() {
     built_link=$(_build_qx_link "$tag" 2>/dev/null) && [ -n "$built_link" ] && { echo "$built_link"; return 0; }
 
     jq --arg tag "$tag" -r '.[$tag].share_link // .[$tag].qx_link // empty' "$XRAY_METADATA" 2>/dev/null
+}
+
+_show_xray_share_link() {
+    local tag="$1" title="${2:-Quantumult X}"
+    local link
+    link=$(_get_xray_share_link "$tag")
+    [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
+    echo ""
+    echo -e "  ${YELLOW}${title}:${NC} ${link}"
+    echo ""
 }
 
 _list_xray_tags() {
@@ -770,9 +826,7 @@ _add_ss2022_reality() {
 
     _manage_xray_service restart
     _success "SS2022+Reality 节点 [${name}] 添加成功。"
-    echo ""
-    echo -e "  ${YELLOW}Quantumult X:${NC} ${qx_link}"
-    echo ""
+    _show_xray_share_link "$tag"
 }
 
 _view_xray_nodes() {
