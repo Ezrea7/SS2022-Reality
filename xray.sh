@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -42,25 +42,9 @@ _pause() {
 _menu_item()   { printf "  ${GREEN}[%-2s]${NC} %s\n" "$1" "$2"; }
 _menu_danger() { printf "  ${RED}[%-2s]${NC} %s\n" "$1" "$2"; }
 _menu_exit()   { printf "  ${YELLOW}[%-2s]${NC} %s\n" "$1" "$2"; }
-
-_is_yes() { [ "$1" = "y" ] || [ "$1" = "Y" ]; }
-_have_xray_nodes() { [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1; }
-_get_inbound_field() {
-    local tag="$1" field="$2"
-    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
-}
-_cleanup_xray_runtime() {
-    _manage_xray_service stop >/dev/null 2>&1 || true
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable xray >/dev/null 2>&1
-        rm -f /etc/systemd/system/xray.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-update del xray default >/dev/null 2>&1
-        rm -f /etc/init.d/xray
-    fi
-    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
-    rm -rf "$XRAY_DIR"
+_confirm_yes() {
+    local answer="$1"
+    [ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 
 _check_root() {
@@ -317,31 +301,6 @@ _atomic_modify_json() {
     fi
 }
 
-_check_port_occupied() {
-    local port="$1"
-    if command -v ss >/dev/null 2>&1; then
-        ss -lnt 2>/dev/null | grep -q ":${port} " && return 0
-        ss -lnu 2>/dev/null | grep -q ":${port} " && return 0
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -lnt 2>/dev/null | grep -q ":${port} " && return 0
-        netstat -lnu 2>/dev/null | grep -q ":${port} " && return 0
-    fi
-    return 1
-}
-
-_check_xray_port_conflict() {
-    local port="$1"
-    if _check_port_occupied "$port"; then
-        _error "端口 ${port} 已被系统占用。"
-        return 0
-    fi
-    if [ -f "$XRAY_CONFIG" ] && jq -e ".inbounds[] | select(.port == $port)" "$XRAY_CONFIG" >/dev/null 2>&1; then
-        _error "端口 ${port} 已被 Xray 节点使用。"
-        return 0
-    fi
-    return 1
-}
-
 _input_port() {
     local port=""
     while true; do
@@ -351,7 +310,6 @@ _input_port() {
             _error "无效端口号。"
             continue
         fi
-        _check_xray_port_conflict "$port" && continue
         echo "$port"
         return 0
     done
@@ -650,19 +608,18 @@ _get_xray_tag_name() {
     [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
 }
 
-_get_xray_share_link() {
+_get_xray_qx_link() {
     local tag="$1" saved_link built_link
     saved_link=$(_get_xray_meta_field "$tag" qx_link)
-    [ -n "$saved_link" ] || saved_link=$(_get_xray_meta_field "$tag" share_link)
     [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
     built_link=$(_build_qx_link "$tag" 2>/dev/null)
     [ -n "$built_link" ] && { echo "$built_link"; return 0; }
     return 1
 }
 
-_show_xray_share_link() {
+_show_xray_qx_link() {
     local tag="$1" title="${2:-Quantumult X}" link
-    link=$(_get_xray_share_link "$tag")
+    link=$(_get_xray_qx_link "$tag")
     [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
     echo ""
     echo -e "  ${YELLOW}${title}:${NC} ${link}"
@@ -694,6 +651,11 @@ _replace_port_in_text() {
     printf '%s' "$text" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g"
 }
 
+_set_xray_meta_field() {
+    local tag="$1" key="$2" value="$3"
+    _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$value\"" >/dev/null 2>&1
+}
+
 _save_xray_meta() {
     local tag="$1" name="$2" link="$3"
     shift 3
@@ -703,8 +665,7 @@ _save_xray_meta() {
     for pair in "$@"; do
         local key="${pair%%=*}" val="${pair#*=}"
         [ -n "$key" ] && [ -n "$val" ] || continue
-        [ "$key" = "share_link" ] && continue
-        _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$val\"" >/dev/null 2>&1 || true
+        _set_xray_meta_field "$tag" "$key" "$val" || true
     done
 }
 
@@ -831,7 +792,7 @@ _add_ss2022_reality() {
 
     _manage_xray_service restart
     _success "SS2022+Reality 节点 [${name}] 添加成功。"
-    _show_xray_share_link "$tag"
+    _show_xray_qx_link "$tag"
 }
 
 _view_xray_nodes() {
@@ -850,7 +811,7 @@ _view_xray_nodes() {
         network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
         security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
         name=$(_get_xray_tag_name "$tag")
-        link=$(_get_xray_share_link "$tag")
+        link=$(_get_xray_qx_link "$tag")
         echo ""
         echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
         echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
@@ -868,11 +829,11 @@ _delete_xray_node() {
         return
     fi
 
-    local target_tag target_name
+    local target_tag target_name confirm
     target_tag=$(_select_xray_tag "══════════ 选择要删除的节点 ══════════") || return
     target_name=$(_get_xray_tag_name "$target_tag")
     read -p "确定删除 [${target_name}]? (y/N): " confirm
-    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "已取消。"; return; }
+    _confirm_yes "$confirm" || { _info "已取消。"; return; }
 
     _delete_xray_inbound_by_tag "$target_tag" || return 1
     _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
@@ -895,6 +856,8 @@ _modify_xray_port() {
 
     _info "当前端口: ${old_port}"
     new_port=$(_input_port)
+    [ "$new_port" = "$old_port" ] && { _info "新端口与当前端口一致，无需修改。"; return 0; }
+
     new_tag=$(printf '%s' "$target_tag" | sed "s/${old_port}/${new_port}/g")
     new_name=$(printf '%s' "$target_name" | sed "s/${old_port}/${new_port}/g")
     [ -n "$new_tag" ] || new_tag="$target_tag"
@@ -905,13 +868,17 @@ _modify_xray_port() {
         return 1
     fi
 
-    old_qx_link=$(_get_xray_share_link "$target_tag")
+    old_qx_link=$(_get_xray_qx_link "$target_tag")
     _update_xray_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
 
     new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
     [ -n "$new_link" ] || new_link=$(_build_qx_link "$new_tag" 2>/dev/null)
     tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, share_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
+        rm -f "$tmp"
+        _error "更新节点元数据失败。"
+        return 1
+    }
 
     _manage_xray_service restart
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
@@ -938,7 +905,7 @@ _uninstall_xray() {
     _warn "即将卸载 Xray 核心及其所有配置！"
     printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
     read -r confirm
-    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "卸载已取消。"; return; }
+    _confirm_yes "$confirm" || { _info "卸载已取消。"; return; }
 
     _cleanup_xray_files
     _success "Xray 核心已完全卸载！"
@@ -960,7 +927,7 @@ _uninstall_script() {
 
     printf "${YELLOW}确定要执行卸载吗? (y/N): ${NC}"
     read -r confirm_main
-    [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && { _info "卸载已取消。"; return; }
+    _confirm_yes "$confirm_main" || { _info "卸载已取消。"; return; }
 
     _cleanup_xray_files
 
