@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="0.0.3"
+SCRIPT_VERSION="0.0.4"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -284,8 +284,15 @@ _init_server_ip() {
 }
 
 _get_mem_limit() {
-    echo 0
-    return 0
+    local total_mem_mb limit
+    total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
+        echo 256
+        return 0
+    fi
+    limit=$((total_mem_mb * 90 / 100))
+    [ "$limit" -lt 10 ] && limit=10
+    echo "$limit"
 }
 
 _atomic_modify_json() {
@@ -348,6 +355,8 @@ JSON
 }
 
 _create_xray_systemd_service() {
+    local mem_limit_mb
+    mem_limit_mb=$(_get_mem_limit)
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -355,6 +364,7 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
+Environment="GOMEMLIMIT=${mem_limit_mb}MiB"
 ExecStart=${XRAY_BIN} run -c ${XRAY_CONFIG}
 Restart=on-failure
 RestartSec=3s
@@ -369,12 +379,15 @@ EOF2
 }
 
 _create_xray_openrc_service() {
+    local mem_limit_mb
+    mem_limit_mb=$(_get_mem_limit)
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="${XRAY_BIN}"
 command_args="run -c ${XRAY_CONFIG}"
 supervisor="supervise-daemon"
+supervise_daemon_args="--env GOMEMLIMIT=${mem_limit_mb}MiB"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
