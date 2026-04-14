@@ -693,7 +693,7 @@ _build_qx_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, udp-over-tcp=sp.v2, tag=%s\n' \
+    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
         "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
 }
 _has_xray_nodes() {
@@ -780,7 +780,7 @@ _add_ss2022_reality() {
 
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
 
-    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
+    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, tag=${name}"
 
     _save_xray_meta "$tag" "$name" "$qx_link" \
         "password=${password}" \
