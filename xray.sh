@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -725,7 +725,7 @@ _select_xray_tag() {
 }
 
 _add_ss2022_reality() {
-    [ -z "$server_ip" ] && server_ip=$(_get_public_ip)
+    [ -z "$server_ip" ] && _init_server_ip
 
     local node_ip custom_ip port sni custom_sni default_name custom_name name tag method password link_ip stream inbound qx_link
     node_ip="$server_ip"
@@ -995,7 +995,6 @@ _main() {
     _detect_init_system
     _ensure_deps
     _install_script_shortcut
-    _init_server_ip
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
