@@ -43,6 +43,26 @@ _menu_item()   { printf "  ${GREEN}[%-2s]${NC} %s\n" "$1" "$2"; }
 _menu_danger() { printf "  ${RED}[%-2s]${NC} %s\n" "$1" "$2"; }
 _menu_exit()   { printf "  ${YELLOW}[%-2s]${NC} %s\n" "$1" "$2"; }
 
+_is_yes() { [ "$1" = "y" ] || [ "$1" = "Y" ]; }
+_have_xray_nodes() { [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1; }
+_get_inbound_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
+}
+_cleanup_xray_runtime() {
+    _manage_xray_service stop >/dev/null 2>&1 || true
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable xray >/dev/null 2>&1
+        rm -f /etc/systemd/system/xray.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-update del xray default >/dev/null 2>&1
+        rm -f /etc/init.d/xray
+    fi
+    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
+    rm -rf "$XRAY_DIR"
+}
+
 _check_root() {
     if [ "$EUID" -ne 0 ]; then
         _error "请使用 root 权限运行。"
@@ -456,18 +476,7 @@ _get_xray_service_status() {
 }
 
 _show_xray_runtime_summary() {
-    local version status count suffix
-    version=$(_get_xray_core_version)
-    status=$(_get_xray_service_status)
-    count=$(_get_xray_node_count)
-
-    if [ "$count" = "1" ]; then
-        suffix="节点"
-    else
-        suffix="节点"
-    fi
-
-    echo -e " Xray ${YELLOW}${version}${NC}: ${GREEN}${status}${NC} (${count}${suffix})"
+    echo -e " Xray ${YELLOW}$(_get_xray_core_version)${NC}: ${GREEN}$(_get_xray_service_status)${NC} ($(_get_xray_node_count)节点)"
     echo -e "--------------------------------------------------"
 }
 
@@ -625,38 +634,9 @@ _build_reality_stream() {
         }'
 }
 
-_get_xray_share_link() {
-    local tag="$1" protocol network security port name
-    protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol // empty' "$XRAY_CONFIG" 2>/dev/null)
-    port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port // empty' "$XRAY_CONFIG" 2>/dev/null)
-    network=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.network // "raw"' "$XRAY_CONFIG" 2>/dev/null)
-    security=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.security // "none"' "$XRAY_CONFIG" 2>/dev/null)
-    name=$(jq --arg tag "$tag" -r '.[$tag].name // empty' "$XRAY_METADATA" 2>/dev/null)
-
-    [ -n "$name" ] || name="$tag"
-
-    local saved_link
-    saved_link=$(jq --arg tag "$tag" -r '.[$tag].qx_link // .[$tag].share_link // empty' "$XRAY_METADATA" 2>/dev/null)
-    [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
-
-    local built_link
-    built_link=$(_build_qx_link "$tag" 2>/dev/null) && [ -n "$built_link" ] && { echo "$built_link"; return 0; }
-
-    jq --arg tag "$tag" -r '.[$tag].share_link // .[$tag].qx_link // empty' "$XRAY_METADATA" 2>/dev/null
-}
-
-_show_xray_share_link() {
-    local tag="$1" title="${2:-Quantumult X}"
-    local link
-    link=$(_get_xray_share_link "$tag")
-    [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
-    echo ""
-    echo -e "  ${YELLOW}${title}:${NC} ${link}"
-    echo ""
-}
-
-_list_xray_tags() {
-    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+_get_inbound_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
 }
 
 _get_xray_meta_field() {
@@ -670,11 +650,32 @@ _get_xray_tag_name() {
     [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
 }
 
+_get_xray_share_link() {
+    local tag="$1" saved_link built_link
+    saved_link=$(_get_xray_meta_field "$tag" qx_link)
+    [ -n "$saved_link" ] || saved_link=$(_get_xray_meta_field "$tag" share_link)
+    [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
+    built_link=$(_build_qx_link "$tag" 2>/dev/null)
+    [ -n "$built_link" ] && { echo "$built_link"; return 0; }
+    return 1
+}
+
+_show_xray_share_link() {
+    local tag="$1" title="${2:-Quantumult X}" link
+    link=$(_get_xray_share_link "$tag")
+    [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
+    echo ""
+    echo -e "  ${YELLOW}${title}:${NC} ${link}"
+    echo ""
+}
+
+_list_xray_tags() {
+    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+}
+
 _delete_xray_inbound_by_tag() {
     local tag="$1"
-    local tmp="${XRAY_CONFIG}.tmp.$$"
-    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag == $tag))' "$XRAY_CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_CONFIG" || {
-        rm -f "$tmp"
+    _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
         _error "删除节点配置失败。"
         return 1
     }
@@ -682,12 +683,7 @@ _delete_xray_inbound_by_tag() {
 
 _update_xray_inbound_port_and_tag() {
     local tag="$1" new_port="$2" new_tag="$3"
-    local tmp="${XRAY_CONFIG}.tmp.$$"
-    jq --arg tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" '
-        (.inbounds[] | select(.tag == $tag) | .port) = $new_port |
-        (.inbounds[] | select(.tag == $tag) | .tag) = $new_tag
-    ' "$XRAY_CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_CONFIG" || {
-        rm -f "$tmp"
+    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\"" || {
         _error "更新节点端口失败。"
         return 1
     }
@@ -702,37 +698,29 @@ _save_xray_meta() {
     local tag="$1" name="$2" link="$3"
     shift 3
 
-    local tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg t "$tag" --arg n "$name" --arg l "$link" '. + {($t): {name: $n, share_link: $l}}' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
-        rm -f "$tmp"
-        return 1
-    }
+    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", share_link: \"$link\"}}" || return 1
 
     for pair in "$@"; do
-        local key="${pair%%=*}"
-        local val="${pair#*=}"
+        local key="${pair%%=*}" val="${pair#*=}"
         [ -n "$key" ] && [ -n "$val" ] || continue
-        tmp="${XRAY_METADATA}.tmp.$$"
-        jq --arg t "$tag" --arg k "$key" --arg v "$val" '.[$t][$k] = $v' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || rm -f "$tmp"
+        _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$val\"" >/dev/null 2>&1 || true
     done
 }
 
 _build_qx_link() {
     local tag="$1"
-    local port name method password sni public_key short_id server_ip link_ip qx_link
+    local port name method password sni public_key short_id server_ip link_ip
 
-    port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port // empty' "$XRAY_CONFIG" 2>/dev/null)
+    port=$(_get_inbound_field "$tag" '.port')
     [ -n "$port" ] || return 1
 
-    name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
-    [ -n "$name" ] || name="$tag"
-
-    method=$(jq --arg tag "$tag" -r '.[$tag].method // empty' "$XRAY_METADATA" 2>/dev/null)
-    password=$(jq --arg tag "$tag" -r '.[$tag].password // empty' "$XRAY_METADATA" 2>/dev/null)
-    sni=$(jq --arg tag "$tag" -r '.[$tag].sni // empty' "$XRAY_METADATA" 2>/dev/null)
-    public_key=$(jq --arg tag "$tag" -r '.[$tag].publicKey // empty' "$XRAY_METADATA" 2>/dev/null)
-    short_id=$(jq --arg tag "$tag" -r '.[$tag].shortId // empty' "$XRAY_METADATA" 2>/dev/null)
-    server_ip=$(jq --arg tag "$tag" -r '.[$tag].server // empty' "$XRAY_METADATA" 2>/dev/null)
+    name=$(_get_xray_tag_name "$tag")
+    method=$(_get_xray_meta_field "$tag" method)
+    password=$(_get_xray_meta_field "$tag" password)
+    sni=$(_get_xray_meta_field "$tag" sni)
+    public_key=$(_get_xray_meta_field "$tag" publicKey)
+    short_id=$(_get_xray_meta_field "$tag" shortId)
+    server_ip=$(_get_xray_meta_field "$tag" server)
 
     [ -n "$method" ] || return 1
     [ -n "$password" ] || return 1
@@ -743,24 +731,24 @@ _build_qx_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-
-    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${public_key}, reality-hex-shortid=${short_id}, udp-relay=true, udp-over-tcp=sp.v2, tag=${name}"
-    printf '%s\n' "$qx_link"
+    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, udp-over-tcp=sp.v2, tag=%s\n' \
+        "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
 }
+_has_xray_nodes() {
+    [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1
+}
+
 _select_xray_tag() {
-    local prompt="$1"
-    local choice
+    local prompt="$1" choice i=1
     local -a tags
     mapfile -t tags < <(_list_xray_tags)
     [ "${#tags[@]}" -gt 0 ] || return 1
 
     echo "" >&2
     echo -e "${YELLOW}${prompt}${NC}" >&2
-    for i in "${!tags[@]}"; do
-        local tag="${tags[$i]}" port name
-        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
-        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
-        echo -e "  ${GREEN}[$((i+1))]${NC} ${name} (端口: ${port})" >&2
+    for tag in "${tags[@]}"; do
+        echo -e "  ${GREEN}[${i}]${NC} $(_get_xray_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))" >&2
+        i=$((i + 1))
     done
     echo -e "  ${RED}[0]${NC} 返回" >&2
     echo "" >&2
@@ -771,7 +759,6 @@ _select_xray_tag() {
         _error "无效选择。"
         return 1
     fi
-
     printf '%s\n' "${tags[$((choice-1))]}"
 }
 
@@ -848,7 +835,7 @@ _add_ss2022_reality() {
 }
 
 _view_xray_nodes() {
-    if [ ! -f "$XRAY_CONFIG" ] || ! jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1; then
+    if ! _has_xray_nodes; then
         _warn "当前没有 Xray 节点。"
         return
     fi
@@ -858,11 +845,11 @@ _view_xray_nodes() {
     local count=0 tag protocol port network security name link
     while IFS= read -r tag; do
         count=$((count + 1))
-        protocol=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .protocol' "$XRAY_CONFIG")
-        port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
-        network=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.network // "raw"' "$XRAY_CONFIG")
-        security=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .streamSettings.security // "none"' "$XRAY_CONFIG")
-        name=$(jq --arg tag "$tag" -r '.[$tag].name // $tag' "$XRAY_METADATA" 2>/dev/null)
+        protocol=$(_get_inbound_field "$tag" '.protocol')
+        port=$(_get_inbound_field "$tag" '.port')
+        network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
+        security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
+        name=$(_get_xray_tag_name "$tag")
         link=$(_get_xray_share_link "$tag")
         echo ""
         echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
@@ -876,7 +863,7 @@ _view_xray_nodes() {
 }
 
 _delete_xray_node() {
-    if [ ! -f "$XRAY_CONFIG" ] || ! jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1; then
+    if ! _has_xray_nodes; then
         _warn "当前没有 Xray 节点。"
         return
     fi
@@ -894,14 +881,14 @@ _delete_xray_node() {
 }
 
 _modify_xray_port() {
-    if [ ! -f "$XRAY_CONFIG" ] || ! jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1; then
+    if ! _has_xray_nodes; then
         _warn "当前没有 Xray 节点。"
         return
     fi
 
-    local target_tag old_port target_name new_port new_tag new_name old_link new_link old_qx_link tmp
+    local target_tag old_port target_name new_port new_tag new_name old_qx_link new_link tmp
     target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
-    old_port=$(jq --arg tag "$target_tag" -r '.inbounds[] | select(.tag == $tag) | .port' "$XRAY_CONFIG")
+    old_port=$(_get_inbound_field "$target_tag" '.port')
     target_name=$(_get_xray_tag_name "$target_tag")
 
     [ -n "$old_port" ] && [ "$old_port" != "null" ] || { _error "未找到目标节点端口。"; return 1; }
@@ -918,9 +905,7 @@ _modify_xray_port() {
         return 1
     fi
 
-    local old_qx_link new_link tmp
     old_qx_link=$(_get_xray_share_link "$target_tag")
-
     _update_xray_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
 
     new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
@@ -932,13 +917,7 @@ _modify_xray_port() {
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
 }
 
-_uninstall_xray() {
-    echo ""
-    _warn "即将卸载 Xray 核心及其所有配置！"
-    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
-    read -r confirm
-    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "卸载已取消。"; return; }
-
+_cleanup_xray_files() {
     _manage_xray_service stop >/dev/null 2>&1 || true
 
     if [ "$INIT_SYSTEM" = "systemd" ]; then
@@ -950,10 +929,18 @@ _uninstall_xray() {
         rm -f /etc/init.d/xray
     fi
 
-    rm -f "$XRAY_BIN"
+    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
-    rm -f "$XRAY_LOG" "$XRAY_PID_FILE"
+}
 
+_uninstall_xray() {
+    echo ""
+    _warn "即将卸载 Xray 核心及其所有配置！"
+    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
+    read -r confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { _info "卸载已取消。"; return; }
+
+    _cleanup_xray_files
     _success "Xray 核心已完全卸载！"
 }
 
@@ -975,20 +962,7 @@ _uninstall_script() {
     read -r confirm_main
     [[ "$confirm_main" != "y" && "$confirm_main" != "Y" ]] && { _info "卸载已取消。"; return; }
 
-    _manage_xray_service stop >/dev/null 2>&1 || true
-
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable xray >/dev/null 2>&1
-        rm -f /etc/systemd/system/xray.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
-    elif [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-update del xray default >/dev/null 2>&1
-        rm -f /etc/init.d/xray
-    fi
-
-    rm -f "$XRAY_BIN"
-    rm -rf "$XRAY_DIR"
-    rm -f "$XRAY_LOG" "$XRAY_PID_FILE"
+    _cleanup_xray_files
 
     _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
