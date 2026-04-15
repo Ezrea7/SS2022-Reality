@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="0.0.7"
+SCRIPT_VERSION="0.0.8"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -16,7 +16,7 @@ XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_PID_FILE="/tmp/xray.pid"
-DEFAULT_SNI="www.amd.com"
+DEFAULT_SNI="support.apple.com"
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
 
 RED='\033[0;31m'
