@@ -4,7 +4,7 @@
 #      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
 # ============================================================
 
-SCRIPT_VERSION="0.0.6"
+SCRIPT_VERSION="0.0.7"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -15,7 +15,6 @@ XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 XRAY_METADATA="${XRAY_DIR}/metadata.json"
-XRAY_LOG="/var/log/xray.log"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="www.amd.com"
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
@@ -283,18 +282,6 @@ _init_server_ip() {
     fi
 }
 
-_get_mem_limit() {
-    local total_mem_mb limit
-    total_mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-    if ! [[ "$total_mem_mb" =~ ^[0-9]+$ ]] || [ "$total_mem_mb" -le 0 ]; then
-        echo 256
-        return 0
-    fi
-    limit=$((total_mem_mb * 90 / 100))
-    [ "$limit" -lt 10 ] && limit=10
-    echo "$limit"
-}
-
 _atomic_modify_json() {
     local file="$1" filter="$2"
     [ -f "$file" ] || { _error "文件不存在: $file"; return 1; }
@@ -324,7 +311,6 @@ _input_port() {
 
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
-    touch "$XRAY_LOG" 2>/dev/null || true
 
     if [ ! -s "$XRAY_CONFIG" ]; then
         cat > "$XRAY_CONFIG" <<'JSON'
@@ -349,8 +335,6 @@ JSON
 }
 
 _create_xray_systemd_service() {
-    local mem_limit_mb
-    mem_limit_mb=$(_get_mem_limit)
     cat > /etc/systemd/system/xray.service <<EOF2
 [Unit]
 Description=Xray Service
@@ -358,7 +342,6 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-Environment="GOMEMLIMIT=${mem_limit_mb}MiB"
 ExecStart=${XRAY_BIN} run -c ${XRAY_CONFIG}
 Restart=on-failure
 RestartSec=3s
@@ -373,15 +356,12 @@ EOF2
 }
 
 _create_xray_openrc_service() {
-    local mem_limit_mb
-    mem_limit_mb=$(_get_mem_limit)
     cat > /etc/init.d/xray <<EOF2
 #!/sbin/openrc-run
 description="Xray Service"
 command="${XRAY_BIN}"
 command_args="run -c ${XRAY_CONFIG}"
 supervisor="supervise-daemon"
-supervise_daemon_args="--env GOMEMLIMIT=${mem_limit_mb}MiB"
 respawn_delay=3
 respawn_max=0
 pidfile="${XRAY_PID_FILE}"
@@ -903,7 +883,7 @@ _cleanup_xray_files() {
         rm -f /etc/init.d/xray
     fi
 
-    rm -f "$XRAY_BIN" "$XRAY_LOG" "$XRAY_PID_FILE"
+    rm -f "$XRAY_BIN" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
 }
 
