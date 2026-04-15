@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.7"
+SCRIPT_VERSION="0.1.9"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -336,6 +336,44 @@ _input_uuid() {
     done
 }
 
+_input_node_ip() {
+    local node_ip custom_ip
+    [ -z "$server_ip" ] && _init_server_ip
+    node_ip="$server_ip"
+
+    if [ -n "$server_ip" ]; then
+        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
+        node_ip=${custom_ip:-$server_ip}
+    else
+        _warn "未能自动检测到当前公网 IP，请手动输入。"
+        read -p "请输入服务器 IP: " node_ip
+    fi
+    printf '%s\n' "$node_ip"
+}
+
+_input_sni() {
+    local default_sni="$1" custom_sni
+    [ -n "$default_sni" ] || default_sni="$DEFAULT_SNI"
+    read -p "请输入伪装域名 SNI (默认: ${default_sni}): " custom_sni
+    printf '%s\n' "${custom_sni:-$default_sni}"
+}
+
+_input_node_name() {
+    local protocol="$1" port="$2" default_name custom_name name tag
+    default_name=$(_protocol_default_name "$protocol" "$port")
+    while true; do
+        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
+        name=${custom_name:-$default_name}
+        tag="$name"
+        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+            _error "节点名称已存在，请重新输入。"
+            continue
+        fi
+        printf '%s\n' "$name"
+        return 0
+    done
+}
+
 _init_xray_config() {
     mkdir -p "$XRAY_DIR"
 
@@ -664,11 +702,6 @@ _build_reality_stream() {
                 "shortIds": [$sid]
             }
         }'
-}
-
-_protocol_meta_key() {
-    local protocol="$1" key="$2"
-    printf '%s_%s' "$protocol" "$key"
 }
 
 _get_inbound_field() {
@@ -1046,40 +1079,19 @@ _build_ss2022_reality_link() {
 }
 
 _add_ss2022_reality() {
-    [ -z "$server_ip" ] && _init_server_ip
-
-    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag method password inbound qx_link
+    local protocol node_ip port sni name tag method password inbound qx_link
     protocol="ss2022_reality"
-    node_ip="$server_ip"
 
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
-    else
-        _warn "未能自动检测到当前公网 IP，请手动输入。"
-        read -p "请输入服务器 IP: " node_ip
-    fi
-
+    node_ip=$(_input_node_ip)
     port=$(_input_port)
-    sni="$DEFAULT_SNI"
-    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
-    sni=${custom_sni:-$DEFAULT_SNI}
+    sni=$(_input_sni "$DEFAULT_SNI")
 
     method=$(_ss2022_reality_method)
     password=$(_ss2022_reality_password)
     _generate_reality_keys || return 1
 
-    default_name=$(_protocol_default_name "$protocol" "$port")
-    while true; do
-        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        name=${custom_name:-$default_name}
-        tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-            _error "节点名称已存在，请重新输入。"
-            continue
-        fi
-        break
-    done
+    name=$(_input_node_name "$protocol" "$port") || return 1
+    tag="$name"
 
     inbound=$(_build_ss2022_reality_inbound "$tag" "$port" "$method" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
@@ -1159,39 +1171,18 @@ _build_trojan_reality_link() {
 }
 
 _add_trojan_reality() {
-    [ -z "$server_ip" ] && _init_server_ip
-
-    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag password inbound qx_link
+    local protocol node_ip port sni name tag password inbound qx_link
     protocol="trojan_reality"
-    node_ip="$server_ip"
 
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
-    else
-        _warn "未能自动检测到当前公网 IP，请手动输入。"
-        read -p "请输入服务器 IP: " node_ip
-    fi
-
+    node_ip=$(_input_node_ip)
     port=$(_input_port)
-    sni="$DEFAULT_SNI"
-    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
-    sni=${custom_sni:-$DEFAULT_SNI}
+    sni=$(_input_sni "$DEFAULT_SNI")
 
     password=$(_trojan_reality_password)
     _generate_reality_keys || return 1
 
-    default_name=$(_protocol_default_name "$protocol" "$port")
-    while true; do
-        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        name=${custom_name:-$default_name}
-        tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-            _error "节点名称已存在，请重新输入。"
-            continue
-        fi
-        break
-    done
+    name=$(_input_node_name "$protocol" "$port") || return 1
+    tag="$name"
 
     inbound=$(_build_trojan_reality_inbound "$tag" "$port" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
@@ -1260,39 +1251,18 @@ _build_vmess_reality_link() {
 }
 
 _add_vmess_reality() {
-    [ -z "$server_ip" ] && _init_server_ip
-
-    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag uuid inbound qx_link
+    local protocol node_ip port sni name tag uuid inbound qx_link
     protocol="vmess_reality"
-    node_ip="$server_ip"
 
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
-    else
-        _warn "未能自动检测到当前公网 IP，请手动输入。"
-        read -p "请输入服务器 IP: " node_ip
-    fi
-
+    node_ip=$(_input_node_ip)
     port=$(_input_port)
-    sni="$DEFAULT_SNI"
-    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
-    sni=${custom_sni:-$DEFAULT_SNI}
+    sni=$(_input_sni "$DEFAULT_SNI")
 
     uuid=$(_input_uuid)
     _generate_reality_keys || return 1
 
-    default_name=$(_protocol_default_name "$protocol" "$port")
-    while true; do
-        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        name=${custom_name:-$default_name}
-        tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-            _error "节点名称已存在，请重新输入。"
-            continue
-        fi
-        break
-    done
+    name=$(_input_node_name "$protocol" "$port") || return 1
+    tag="$name"
 
     inbound=$(_build_vmess_reality_inbound "$tag" "$port" "$uuid" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
@@ -1363,39 +1333,18 @@ _build_vless_vision_reality_link() {
 }
 
 _add_vless_vision_reality() {
-    [ -z "$server_ip" ] && _init_server_ip
-
-    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag uuid inbound qx_link
+    local protocol node_ip port sni name tag uuid inbound qx_link
     protocol="vless_vision_reality"
-    node_ip="$server_ip"
 
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
-    else
-        _warn "未能自动检测到当前公网 IP，请手动输入。"
-        read -p "请输入服务器 IP: " node_ip
-    fi
-
+    node_ip=$(_input_node_ip)
     port=$(_input_port)
-    sni="$DEFAULT_SNI"
-    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
-    sni=${custom_sni:-$DEFAULT_SNI}
+    sni=$(_input_sni "$DEFAULT_SNI")
 
     uuid=$(_input_uuid)
     _generate_reality_keys || return 1
 
-    default_name=$(_protocol_default_name "$protocol" "$port")
-    while true; do
-        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        name=${custom_name:-$default_name}
-        tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-            _error "节点名称已存在，请重新输入。"
-            continue
-        fi
-        break
-    done
+    name=$(_input_node_name "$protocol" "$port") || return 1
+    tag="$name"
 
     inbound=$(_build_vless_vision_reality_inbound "$tag" "$port" "$uuid" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
