@@ -106,3 +106,8 @@ outbounds 精简为仅保留 freedom 
 删除 XRAY_LOG 相关冗余逻辑
 移除脚本内内存限制逻辑，交由 Xray 自行控制
 默认 SNI 改为  support.apple.com 
+---
+
+## License
+
+MIT License
