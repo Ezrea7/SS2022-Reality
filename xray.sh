@@ -330,17 +330,14 @@ _init_xray_config() {
         cat > "$XRAY_CONFIG" <<'JSON'
 {
   "log": {
-    "loglevel": "warning"
+    "access": "none",
+    "error": "none",
+    "loglevel": "none"
   },
   "inbounds": [],
   "outbounds": [
     {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
+      "protocol": "freedom"
     }
   ],
   "routing": {
