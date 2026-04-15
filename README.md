@@ -1,4 +1,4 @@
-# Xray SS2022 + Reality 一键管理脚本
+# Xray xTLS + Reality 一键管理脚本
 
 <div align="center">
 
@@ -37,13 +37,13 @@
 ### 一键安装脚本
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Ezrea7/SS2022-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 && chmod +x /usr/local/bin/SS2022 && /usr/local/bin/SS2022
+curl -fsSL https://raw.githubusercontent.com/Ezrea7/xTLS-Reality/refs/heads/main/xray.sh -o /usr/local/bin/SS2022 && chmod +x /usr/local/bin/SS2022 && /usr/local/bin/SS2022
 ```
 ## 快捷指令
 
 ### 安装完成后，使用以下命令进入管理菜单：
 ```
-ss2022
+xtls
 ```
 
 # Quanumult X配置示例
