@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.1"
+SCRIPT_VERSION="0.1.2"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -860,8 +860,14 @@ _protocol_view_all_nodes() {
 }
 
 _protocol_view_one_node() {
-    local target_tag protocol port network security name link
+    local target_tag
     target_tag=$(_select_tag "══════════ 选择要查看的节点 ══════════") || return
+    _protocol_view_one_node_by_tag "$target_tag"
+}
+
+_protocol_view_one_node_by_tag() {
+    local target_tag="$1" protocol port network security name link
+    [ -n "$target_tag" ] || return 1
     protocol=$(_get_inbound_field "$target_tag" '.protocol')
     port=$(_get_inbound_field "$target_tag" '.port')
     network=$(_get_inbound_field "$target_tag" '.streamSettings.network // "raw"')
@@ -885,25 +891,38 @@ _protocol_view_one_node() {
 }
 
 _protocol_view_nodes() {
-    local choice
+    local choice i=1
+    local -a tags
     if ! _has_nodes; then
         _warn "当前没有 Xray 节点。"
         return
     fi
 
+    mapfile -t tags < <(_list_tags)
+    [ "${#tags[@]}" -gt 0 ] || { _warn "当前没有 Xray 节点。"; return; }
+
     echo ""
     echo -e "${YELLOW}══════════ 查看节点 ══════════${NC}"
-    echo -e "  ${GREEN}[1]${NC} 选择单个节点查看"
+    for tag in "${tags[@]}"; do
+        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))"
+        i=$((i + 1))
+    done
     echo -e "  ${GREEN}[a]${NC} 查看全部节点"
     echo -e "  ${RED}[0]${NC} 返回"
     echo ""
-    read -p "请选择 [0/1/a]: " choice
+    read -p "请选择 [0-${#tags[@]}/a]: " choice
 
     case "$choice" in
-        1) _protocol_view_one_node ;;
         a|A) _protocol_view_all_nodes ;;
         0) return 0 ;;
-        *) _error "无效输入。"; return 1 ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#tags[@]}" ]; then
+                _protocol_view_one_node_by_tag "${tags[$((choice-1))]}"
+            else
+                _error "无效输入。"
+                return 1
+            fi
+            ;;
     esac
 }
 
