@@ -98,9 +98,9 @@ udp-over-tcp=sp.v2,
 ```
 # 📜 更新日志
 v0.0.8
-  默认  log  改为完全关闭
-  outbounds  精简为仅保留  freedom 
-  删除空的  routing.rules 
-  删除  XRAY_LOG  相关冗余逻辑
-  移除脚本内内存限制逻辑，交由 Xray 自行控制
-  默认 SNI 改为  support.apple.com 
+默认  log  改为完全关闭
+outbounds 精简为仅保留 freedom 
+删除空的 routing.rules 
+删除 XRAY_LOG 相关冗余逻辑
+移除脚本内内存限制逻辑，交由 Xray 自行控制
+默认 SNI 改为  support.apple.com 
