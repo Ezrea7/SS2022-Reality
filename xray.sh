@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.3"
+SCRIPT_VERSION="0.1.5"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -277,13 +277,10 @@ _choose_ip_preference() {
 }
 
 _init_server_ip() {
-    _info "正在获取服务器公网 IP..."
     server_ip=$(_get_public_ip)
     if [ -z "$server_ip" ] || [ "$server_ip" = "null" ]; then
         _warn "自动获取 IP 失败，请添加节点时手动输入。"
         server_ip=""
-    else
-        _success "当前服务器公网 IP: ${server_ip}"
     fi
 }
 
@@ -768,6 +765,7 @@ _build_protocol_share_link() {
         ss2022_reality) _build_ss2022_reality_link "$tag" ;;
         trojan_reality) _build_trojan_reality_link "$tag" ;;
         vmess_reality) _build_vmess_reality_link "$tag" ;;
+        vless_vision_reality) _build_vless_vision_reality_link "$tag" ;;
         *) return 1 ;;
     esac
 }
@@ -799,6 +797,7 @@ _protocol_name() {
         ss2022_reality) echo "SS2022 + Reality" ;;
         trojan_reality) echo "Trojan + Reality" ;;
         vmess_reality) echo "Vmess + Reality" ;;
+        vless_vision_reality) echo "VLESS + Vision + Reality" ;;
         *) echo "$1" ;;
     esac
 }
@@ -809,13 +808,14 @@ _protocol_default_name() {
         ss2022_reality) printf 'SS2022-REALITY-%s\n' "$port" ;;
         trojan_reality) printf 'TROJAN-REALITY-%s\n' "$port" ;;
         vmess_reality) printf 'VMESS-REALITY-%s\n' "$port" ;;
+        vless_vision_reality) printf 'VLESS-REALITY-VISION-%s\n' "$port" ;;
         *) printf '%s-%s\n' "$protocol" "$port" ;;
     esac
 }
 
 _protocol_validate_supported() {
     case "$1" in
-        ss2022_reality|trojan_reality|vmess_reality) return 0 ;;
+        ss2022_reality|trojan_reality|vmess_reality|vless_vision_reality) return 0 ;;
         *) _error "暂不支持的协议: $1"; return 1 ;;
     esac
 }
@@ -826,6 +826,7 @@ _protocol_add_node() {
         ss2022_reality) _add_ss2022_reality ;;
         trojan_reality) _add_trojan_reality ;;
         vmess_reality) _add_vmess_reality ;;
+        vless_vision_reality) _add_vless_vision_reality ;;
         *) _error "暂不支持的协议: $protocol"; return 1 ;;
     esac
 }
@@ -1310,6 +1311,109 @@ _add_vmess_reality() {
     _show_share_link "$tag"
 }
 
+# ===================== 协议实现：VLESS + XTLS-RPRX-Vision + Reality =====================
+
+_build_vless_vision_reality_inbound() {
+    local tag="$1" port="$2" uuid="$3" sni="$4" private_key="$5" short_id="$6"
+    local stream
+    stream=$(_build_reality_stream "raw" "$sni" "$private_key" "$short_id")
+
+    jq -n --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --argjson stream "$stream" '
+        {
+            "tag": $tag,
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": $uuid,
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": $stream
+        }'
+}
+
+_build_vless_vision_reality_link() {
+    local tag="$1"
+    local port name uuid sni public_key short_id server_ip link_ip
+
+    port=$(_get_inbound_field "$tag" '.port')
+    [ -n "$port" ] || return 1
+
+    name=$(_get_tag_name "$tag")
+    uuid=$(_get_meta_field "$tag" uuid)
+    sni=$(_get_meta_field "$tag" sni)
+    public_key=$(_get_meta_field "$tag" publicKey)
+    short_id=$(_get_meta_field "$tag" shortId)
+    server_ip=$(_get_meta_field "$tag" server)
+
+    [ -n "$uuid" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
+
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    printf 'vless=%s:%s, method=none, password=%s, obfs=over-tls, obfs-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, vless-flow=xtls-rprx-vision, tag=%s\n' \
+        "$link_ip" "$port" "$uuid" "$sni" "$public_key" "$short_id" "$name"
+}
+
+_add_vless_vision_reality() {
+    [ -z "$server_ip" ] && _init_server_ip
+
+    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag uuid inbound qx_link
+    protocol="vless_vision_reality"
+    node_ip="$server_ip"
+
+    if [ -n "$server_ip" ]; then
+        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
+        node_ip=${custom_ip:-$server_ip}
+    else
+        _warn "未能自动检测到当前公网 IP，请手动输入。"
+        read -p "请输入服务器 IP: " node_ip
+    fi
+
+    port=$(_input_port)
+    sni="$DEFAULT_SNI"
+    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
+    sni=${custom_sni:-$DEFAULT_SNI}
+
+    uuid=$(_input_uuid)
+    _generate_reality_keys || return 1
+
+    default_name=$(_protocol_default_name "$protocol" "$port")
+    while true; do
+        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
+        name=${custom_name:-$default_name}
+        tag="$name"
+        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+            _error "节点名称已存在，请重新输入。"
+            continue
+        fi
+        break
+    done
+
+    inbound=$(_build_vless_vision_reality_inbound "$tag" "$port" "$uuid" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
+    _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
+
+    qx_link=$(_build_vless_vision_reality_link "$tag" 2>/dev/null)
+    _save_meta_bundle "$tag" "$name" "$qx_link" \
+        "protocol=${protocol}" \
+        "uuid=${uuid}" \
+        "publicKey=${REALITY_PUBLIC_KEY}" \
+        "shortId=${REALITY_SHORT_ID}" \
+        "server=${node_ip}" \
+        "sni=${sni}"
+
+    _manage_xray_service restart
+    _success "VLESS+Vision+Reality 节点 [${name}] 添加成功。"
+    _show_share_link "$tag"
+}
+
 # ===================== 预留协议模板（示例） =====================
 
 # 后续新增协议时，按下面模式补充即可：
@@ -1327,14 +1431,16 @@ _add_protocol_menu() {
     echo -e "  ${GREEN}[1]${NC} SS2022 + Reality"
     echo -e "  ${GREEN}[2]${NC} Trojan + Reality"
     echo -e "  ${GREEN}[3]${NC} Vmess + Reality"
+    echo -e "  ${GREEN}[4]${NC} VLESS + Vision + Reality"
     echo -e "  ${RED}[0]${NC} 返回"
     echo ""
-    read -p "请选择 [0-3]: " choice
+    read -p "请选择 [0-4]: " choice
 
     case "$choice" in
         1) _protocol_add_node ss2022_reality ;;
         2) _protocol_add_node trojan_reality ;;
         3) _protocol_add_node vmess_reality ;;
+        4) _protocol_add_node vless_vision_reality ;;
         0) return 0 ;;
         *) _error "无效输入。"; return 1 ;;
     esac
