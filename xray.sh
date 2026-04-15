@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ============================================================
-#      Xray SS2022 + Reality 独立安装管理脚本 (单协议版)
+#      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.0.8"
+SCRIPT_VERSION="0.1.0"
 SCRIPT_CMD_NAME="ss2022"
 SCRIPT_CMD_ALIAS="SS2022"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -18,6 +18,7 @@ XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_PID_FILE="/tmp/xray.pid"
 DEFAULT_SNI="support.apple.com"
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
+DEFAULT_PROTOCOL="ss2022_reality"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -31,6 +32,8 @@ _warn()    { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
 
 trap 'rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
+
+# ===================== 基础与通用 =====================
 
 _pause() {
     [ -t 0 ] || return 0
@@ -169,6 +172,8 @@ _update_script_self() {
     _warn "请重新运行 ${SCRIPT_CMD_NAME} 或 ${SCRIPT_CMD_ALIAS} 以加载新版本。"
 }
 
+# ===================== 网络与环境 =====================
+
 _get_ip_preference() {
     local pref=""
     if [ -f "$IP_PREF_FILE" ]; then
@@ -281,6 +286,8 @@ _init_server_ip() {
         _success "当前服务器公网 IP: ${server_ip}"
     fi
 }
+
+# ===================== Xray 核心与服务 =====================
 
 _atomic_modify_json() {
     local file="$1" filter="$2"
@@ -548,329 +555,6 @@ _install_or_update_xray() {
     fi
 }
 
-_generate_reality_keys() {
-    local keypair
-    keypair=$($XRAY_BIN x25519 2>&1)
-    REALITY_PRIVATE_KEY=$(echo "$keypair" | awk 'NR==1 {print $NF}')
-    REALITY_PUBLIC_KEY=$(echo "$keypair" | awk 'NR==2 {print $NF}')
-    REALITY_SHORT_ID=$(openssl rand -hex 8)
-
-    if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
-        _error "Reality 密钥生成失败。"
-        echo "$keypair" >&2
-        return 1
-    fi
-}
-
-_build_reality_stream() {
-    local network="$1" sni="$2" private_key="$3" short_id="$4"
-    jq -n --arg net "$network" --arg sni "$sni" --arg pk "$private_key" --arg sid "$short_id" '
-        {
-            "network": $net,
-            "security": "reality",
-            "realitySettings": {
-                "show": false,
-                "target": ($sni + ":443"),
-                "xver": 0,
-                "serverNames": [$sni],
-                "privateKey": $pk,
-                "shortIds": [$sid]
-            }
-        }'
-}
-
-_get_inbound_field() {
-    local tag="$1" field="$2"
-    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
-}
-
-_get_xray_meta_field() {
-    local tag="$1" field="$2"
-    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
-}
-
-_get_xray_tag_name() {
-    local tag="$1" name
-    name=$(_get_xray_meta_field "$tag" name)
-    [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
-}
-
-_get_xray_qx_link() {
-    local tag="$1" saved_link built_link
-    saved_link=$(_get_xray_meta_field "$tag" qx_link)
-    [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
-    built_link=$(_build_qx_link "$tag" 2>/dev/null)
-    [ -n "$built_link" ] && { echo "$built_link"; return 0; }
-    return 1
-}
-
-_show_xray_qx_link() {
-    local tag="$1" title="${2:-Quantumult X}" link
-    link=$(_get_xray_qx_link "$tag")
-    [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
-    echo ""
-    echo -e "  ${YELLOW}${title}:${NC} ${link}"
-    echo ""
-}
-
-_list_xray_tags() {
-    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
-}
-
-_delete_xray_inbound_by_tag() {
-    local tag="$1"
-    _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
-        _error "删除节点配置失败。"
-        return 1
-    }
-}
-
-_update_xray_inbound_port_and_tag() {
-    local tag="$1" new_port="$2" new_tag="$3"
-    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\"" || {
-        _error "更新节点端口失败。"
-        return 1
-    }
-}
-
-_replace_port_in_text() {
-    local text="$1" old_port="$2" new_port="$3"
-    printf '%s' "$text" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g"
-}
-
-_set_xray_meta_field() {
-    local tag="$1" key="$2" value="$3"
-    _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$value\"" >/dev/null 2>&1
-}
-
-_save_xray_meta() {
-    local tag="$1" name="$2" link="$3"
-    shift 3
-
-    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", qx_link: \"$link\"}}" || return 1
-
-    for pair in "$@"; do
-        local key="${pair%%=*}" val="${pair#*=}"
-        [ -n "$key" ] && [ -n "$val" ] || continue
-        _set_xray_meta_field "$tag" "$key" "$val" || true
-    done
-}
-
-_build_qx_link() {
-    local tag="$1"
-    local port name method password sni public_key short_id server_ip link_ip
-
-    port=$(_get_inbound_field "$tag" '.port')
-    [ -n "$port" ] || return 1
-
-    name=$(_get_xray_tag_name "$tag")
-    method=$(_get_xray_meta_field "$tag" method)
-    password=$(_get_xray_meta_field "$tag" password)
-    sni=$(_get_xray_meta_field "$tag" sni)
-    public_key=$(_get_xray_meta_field "$tag" publicKey)
-    short_id=$(_get_xray_meta_field "$tag" shortId)
-    server_ip=$(_get_xray_meta_field "$tag" server)
-
-    [ -n "$method" ] || return 1
-    [ -n "$password" ] || return 1
-    [ -n "$sni" ] || return 1
-    [ -n "$public_key" ] || return 1
-    [ -n "$short_id" ] || return 1
-    [ -n "$server_ip" ] || return 1
-
-    link_ip="$server_ip"
-    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
-        "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
-}
-_has_xray_nodes() {
-    [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1
-}
-
-_select_xray_tag() {
-    local prompt="$1" choice i=1
-    local -a tags
-    mapfile -t tags < <(_list_xray_tags)
-    [ "${#tags[@]}" -gt 0 ] || return 1
-
-    echo "" >&2
-    echo -e "${YELLOW}${prompt}${NC}" >&2
-    for tag in "${tags[@]}"; do
-        echo -e "  ${GREEN}[${i}]${NC} $(_get_xray_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))" >&2
-        i=$((i + 1))
-    done
-    echo -e "  ${RED}[0]${NC} 返回" >&2
-    echo "" >&2
-    read -p "请选择 [0-${#tags[@]}]: " choice >&2
-
-    [ "$choice" = "0" ] && return 1
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
-        _error "无效选择。"
-        return 1
-    fi
-    printf '%s\n' "${tags[$((choice-1))]}"
-}
-
-_add_ss2022_reality() {
-    [ -z "$server_ip" ] && _init_server_ip
-
-    local node_ip custom_ip port sni custom_sni default_name custom_name name tag method password link_ip stream inbound qx_link
-    node_ip="$server_ip"
-
-    if [ -n "$server_ip" ]; then
-        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
-        node_ip=${custom_ip:-$server_ip}
-    else
-        _warn "未能自动检测到当前公网 IP，请手动输入。"
-        read -p "请输入服务器 IP: " node_ip
-    fi
-
-    port=$(_input_port)
-    sni="$DEFAULT_SNI"
-    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
-    sni=${custom_sni:-$DEFAULT_SNI}
-
-    default_name="SS2022-REALITY-${port}"
-    while true; do
-        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
-        name=${custom_name:-$default_name}
-        tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-            _error "节点名称已存在，请重新输入。"
-            continue
-        fi
-        break
-    done
-
-    method="2022-blake3-aes-128-gcm"
-    password=$(openssl rand -base64 16)
-    _generate_reality_keys || return 1
-
-    tag="$name"
-    link_ip="$node_ip"
-    [[ "$node_ip" == *":"* ]] && link_ip="[$node_ip]"
-
-    stream=$(_build_reality_stream "raw" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
-    inbound=$(jq -n --arg tag "$tag" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson stream "$stream" '
-        {
-            "tag": $tag,
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "shadowsocks",
-            "settings": {
-                "method": $method,
-                "password": $password,
-                "network": "tcp,udp"
-            },
-            "streamSettings": $stream
-        }')
-
-    _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
-
-    qx_link="shadowsocks=${link_ip}:${port}, method=${method}, password=${password}, obfs=over-tls, obfs-host=${sni}, tls-verification=true, reality-base64-pubkey=${REALITY_PUBLIC_KEY}, reality-hex-shortid=${REALITY_SHORT_ID}, udp-relay=true, tag=${name}"
-
-    _save_xray_meta "$tag" "$name" "$qx_link" \
-        "password=${password}" \
-        "publicKey=${REALITY_PUBLIC_KEY}" \
-        "shortId=${REALITY_SHORT_ID}" \
-        "server=${node_ip}" \
-        "sni=${sni}" \
-        "method=${method}"
-
-    _manage_xray_service restart
-    _success "SS2022+Reality 节点 [${name}] 添加成功。"
-    _show_xray_qx_link "$tag"
-}
-
-_view_xray_nodes() {
-    if ! _has_xray_nodes; then
-        _warn "当前没有 Xray 节点。"
-        return
-    fi
-
-    echo ""
-    echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
-    local count=0 tag protocol port network security name link
-    while IFS= read -r tag; do
-        count=$((count + 1))
-        protocol=$(_get_inbound_field "$tag" '.protocol')
-        port=$(_get_inbound_field "$tag" '.port')
-        network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
-        security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
-        name=$(_get_xray_tag_name "$tag")
-        link=$(_get_xray_qx_link "$tag")
-        echo ""
-        echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
-        echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
-        if [ -n "$link" ]; then
-            echo -e "      ${YELLOW}Quantumult X:${NC} ${link}"
-        else
-            echo -e "      ${RED}Quantumult X: 无法生成链接${NC}"
-        fi
-    done < <(_list_xray_tags)
-}
-
-_delete_xray_node() {
-    if ! _has_xray_nodes; then
-        _warn "当前没有 Xray 节点。"
-        return
-    fi
-
-    local target_tag target_name confirm
-    target_tag=$(_select_xray_tag "══════════ 选择要删除的节点 ══════════") || return
-    target_name=$(_get_xray_tag_name "$target_tag")
-    read -p "确定删除 [${target_name}]? (y/N): " confirm
-    _confirm_yes "$confirm" || { _info "已取消。"; return; }
-
-    _delete_xray_inbound_by_tag "$target_tag" || return 1
-    _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
-    _manage_xray_service restart
-    _success "节点 [${target_name}] 已删除。"
-}
-
-_modify_xray_port() {
-    if ! _has_xray_nodes; then
-        _warn "当前没有 Xray 节点。"
-        return
-    fi
-
-    local target_tag old_port target_name new_port new_tag new_name old_qx_link new_link tmp
-    target_tag=$(_select_xray_tag "══════════ 选择要修改端口的节点 ══════════") || return
-    old_port=$(_get_inbound_field "$target_tag" '.port')
-    target_name=$(_get_xray_tag_name "$target_tag")
-
-    [ -n "$old_port" ] && [ "$old_port" != "null" ] || { _error "未找到目标节点端口。"; return 1; }
-
-    _info "当前端口: ${old_port}"
-    new_port=$(_input_port)
-    [ "$new_port" = "$old_port" ] && { _info "新端口与当前端口一致，无需修改。"; return 0; }
-
-    new_tag=$(printf '%s' "$target_tag" | sed "s/${old_port}/${new_port}/g")
-    new_name=$(printf '%s' "$target_name" | sed "s/${old_port}/${new_port}/g")
-    [ -n "$new_tag" ] || new_tag="$target_tag"
-    [ -n "$new_name" ] || new_name="$target_name"
-
-    if [ "$new_tag" != "$target_tag" ] && jq -e --arg tag "$new_tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
-        _error "修改后的节点标签已存在，请调整节点名称后再试。"
-        return 1
-    fi
-
-    old_qx_link=$(_get_xray_qx_link "$target_tag")
-    _update_xray_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
-
-    new_link=$(_replace_port_in_text "$old_qx_link" "$old_port" "$new_port")
-    [ -n "$new_link" ] || new_link=$(_build_qx_link "$new_tag" 2>/dev/null)
-    tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
-        rm -f "$tmp"
-        _error "更新节点元数据失败。"
-        return 1
-    }
-
-    _manage_xray_service restart
-    _success "节点 [${new_name}] 端口已改为 ${new_port}。"
-}
-
 _cleanup_xray_files() {
     _manage_xray_service stop >/dev/null 2>&1 || true
 
@@ -929,13 +613,543 @@ _uninstall_script() {
     exit 0
 }
 
+# ===================== 协议公共能力 =====================
+
+_generate_reality_keys() {
+    local keypair
+    keypair=$($XRAY_BIN x25519 2>&1)
+    REALITY_PRIVATE_KEY=$(echo "$keypair" | awk 'NR==1 {print $NF}')
+    REALITY_PUBLIC_KEY=$(echo "$keypair" | awk 'NR==2 {print $NF}')
+    REALITY_SHORT_ID=$(openssl rand -hex 8)
+
+    if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
+        _error "Reality 密钥生成失败。"
+        echo "$keypair" >&2
+        return 1
+    fi
+}
+
+_build_reality_stream() {
+    local network="$1" sni="$2" private_key="$3" short_id="$4"
+    jq -n --arg net "$network" --arg sni "$sni" --arg pk "$private_key" --arg sid "$short_id" '
+        {
+            "network": $net,
+            "security": "reality",
+            "realitySettings": {
+                "show": false,
+                "target": ($sni + ":443"),
+                "xver": 0,
+                "serverNames": [$sni],
+                "privateKey": $pk,
+                "shortIds": [$sid]
+            }
+        }'
+}
+
+_protocol_meta_key() {
+    local protocol="$1" key="$2"
+    printf '%s_%s' "$protocol" "$key"
+}
+
+_get_inbound_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
+}
+
+_get_meta_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
+}
+
+_set_meta_field() {
+    local tag="$1" key="$2" value="$3"
+    _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$value\"" >/dev/null 2>&1
+}
+
+_save_meta_bundle() {
+    local tag="$1" name="$2" link="$3"
+    shift 3
+
+    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", qx_link: \"$link\"}}" || return 1
+
+    for pair in "$@"; do
+        local key="${pair%%=*}" val="${pair#*=}"
+        [ -n "$key" ] && [ -n "$val" ] || continue
+        _set_meta_field "$tag" "$key" "$val" || true
+    done
+}
+
+_get_tag_name() {
+    local tag="$1" name
+    name=$(_get_meta_field "$tag" name)
+    [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
+}
+
+_list_tags() {
+    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+}
+
+_has_nodes() {
+    [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1
+}
+
+_select_tag() {
+    local prompt="$1" choice i=1
+    local -a tags
+    mapfile -t tags < <(_list_tags)
+    [ "${#tags[@]}" -gt 0 ] || return 1
+
+    echo "" >&2
+    echo -e "${YELLOW}${prompt}${NC}" >&2
+    for tag in "${tags[@]}"; do
+        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))" >&2
+        i=$((i + 1))
+    done
+    echo -e "  ${RED}[0]${NC} 返回" >&2
+    echo "" >&2
+    read -p "请选择 [0-${#tags[@]}]: " choice >&2
+
+    [ "$choice" = "0" ] && return 1
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#tags[@]}" ]; then
+        _error "无效选择。"
+        return 1
+    fi
+    printf '%s\n' "${tags[$((choice-1))]}"
+}
+
+_delete_inbound_by_tag() {
+    local tag="$1"
+    _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
+        _error "删除节点配置失败。"
+        return 1
+    }
+}
+
+_update_inbound_port_and_tag() {
+    local tag="$1" new_port="$2" new_tag="$3"
+    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\"" || {
+        _error "更新节点端口失败。"
+        return 1
+    }
+}
+
+_replace_port_in_text() {
+    local text="$1" old_port="$2" new_port="$3"
+    printf '%s' "$text" | sed "s/:${old_port}/:${new_port}/g; s/-${old_port}/-${new_port}/g"
+}
+
+_build_protocol_share_link() {
+    local tag="$1" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    case "$protocol" in
+        ss2022_reality) _build_ss2022_reality_link "$tag" ;;
+        trojan_reality) _build_trojan_reality_link "$tag" ;;
+        *) return 1 ;;
+    esac
+}
+
+_get_share_link() {
+    local tag="$1" saved_link built_link
+    saved_link=$(_get_meta_field "$tag" qx_link)
+    [ -n "$saved_link" ] && { echo "$saved_link"; return 0; }
+    built_link=$(_build_protocol_share_link "$tag" 2>/dev/null)
+    [ -n "$built_link" ] && { echo "$built_link"; return 0; }
+    return 1
+}
+
+_show_share_link() {
+    local tag="$1" title="${2:-Quantumult X}" link
+    link=$(_get_share_link "$tag")
+    [ -n "$link" ] || { _warn "未能生成分享链接。"; return 1; }
+    echo ""
+    echo -e "  ${YELLOW}${title}:${NC} ${link}"
+    echo ""
+}
+
+_protocol_of_tag() {
+    _get_meta_field "$1" protocol
+}
+
+_protocol_name() {
+    case "$1" in
+        ss2022_reality) echo "SS2022 + Reality" ;;
+        trojan_reality) echo "Trojan + Reality" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+_protocol_default_name() {
+    local protocol="$1" port="$2"
+    case "$protocol" in
+        ss2022_reality) printf 'SS2022-REALITY-%s\n' "$port" ;;
+        trojan_reality) printf 'TROJAN-REALITY-%s\n' "$port" ;;
+        *) printf '%s-%s\n' "$protocol" "$port" ;;
+    esac
+}
+
+_protocol_validate_supported() {
+    case "$1" in
+        ss2022_reality|trojan_reality) return 0 ;;
+        *) _error "暂不支持的协议: $1"; return 1 ;;
+    esac
+}
+
+_protocol_add_node() {
+    local protocol="${1:-$DEFAULT_PROTOCOL}"
+    case "$protocol" in
+        ss2022_reality) _add_ss2022_reality ;;
+        trojan_reality) _add_trojan_reality ;;
+        *) _error "暂不支持的协议: $protocol"; return 1 ;;
+    esac
+}
+
+_protocol_view_nodes() {
+    if ! _has_nodes; then
+        _warn "当前没有 Xray 节点。"
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
+    local count=0 tag protocol port network security name link
+    while IFS= read -r tag; do
+        count=$((count + 1))
+        protocol=$(_get_inbound_field "$tag" '.protocol')
+        port=$(_get_inbound_field "$tag" '.port')
+        network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
+        security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
+        name=$(_get_tag_name "$tag")
+        link=$(_get_share_link "$tag")
+        echo ""
+        echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
+        echo -e "      类型: ${YELLOW}$(_protocol_name "$(_protocol_of_tag "$tag")")${NC}"
+        echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
+        if [ -n "$link" ]; then
+            echo -e "      ${YELLOW}Quantumult X:${NC} ${link}"
+        else
+            echo -e "      ${RED}Quantumult X: 无法生成链接${NC}"
+        fi
+    done < <(_list_tags)
+}
+
+_protocol_delete_node() {
+    if ! _has_nodes; then
+        _warn "当前没有 Xray 节点。"
+        return
+    fi
+
+    local target_tag target_name confirm
+    target_tag=$(_select_tag "══════════ 选择要删除的节点 ══════════") || return
+    target_name=$(_get_tag_name "$target_tag")
+    read -p "确定删除 [${target_name}]? (y/N): " confirm
+    _confirm_yes "$confirm" || { _info "已取消。"; return; }
+
+    _delete_inbound_by_tag "$target_tag" || return 1
+    _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
+    _manage_xray_service restart
+    _success "节点 [${target_name}] 已删除。"
+}
+
+_protocol_modify_port() {
+    if ! _has_nodes; then
+        _warn "当前没有 Xray 节点。"
+        return
+    fi
+
+    local target_tag old_port target_name new_port new_tag new_name old_link new_link tmp
+    target_tag=$(_select_tag "══════════ 选择要修改端口的节点 ══════════") || return
+    old_port=$(_get_inbound_field "$target_tag" '.port')
+    target_name=$(_get_tag_name "$target_tag")
+
+    [ -n "$old_port" ] && [ "$old_port" != "null" ] || { _error "未找到目标节点端口。"; return 1; }
+
+    _info "当前端口: ${old_port}"
+    new_port=$(_input_port)
+    [ "$new_port" = "$old_port" ] && { _info "新端口与当前端口一致，无需修改。"; return 0; }
+
+    new_tag=$(printf '%s' "$target_tag" | sed "s/${old_port}/${new_port}/g")
+    new_name=$(printf '%s' "$target_name" | sed "s/${old_port}/${new_port}/g")
+    [ -n "$new_tag" ] || new_tag="$target_tag"
+    [ -n "$new_name" ] || new_name="$target_name"
+
+    if [ "$new_tag" != "$target_tag" ] && jq -e --arg tag "$new_tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+        _error "修改后的节点标签已存在，请调整节点名称后再试。"
+        return 1
+    fi
+
+    old_link=$(_get_share_link "$target_tag")
+    _update_inbound_port_and_tag "$target_tag" "$new_port" "$new_tag" || return 1
+
+    new_link=$(_replace_port_in_text "$old_link" "$old_port" "$new_port")
+    [ -n "$new_link" ] || new_link=$(_build_protocol_share_link "$new_tag" 2>/dev/null)
+    tmp="${XRAY_METADATA}.tmp.$$"
+    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
+        rm -f "$tmp"
+        _error "更新节点元数据失败。"
+        return 1
+    }
+
+    _manage_xray_service restart
+    _success "节点 [${new_name}] 端口已改为 ${new_port}。"
+}
+
+# ===================== 协议实现：SS2022 + Reality =====================
+
+_ss2022_reality_method() {
+    echo "2022-blake3-aes-128-gcm"
+}
+
+_ss2022_reality_password() {
+    openssl rand -base64 16
+}
+
+_build_ss2022_reality_inbound() {
+    local tag="$1" port="$2" method="$3" password="$4" sni="$5" private_key="$6" short_id="$7"
+    local stream
+    stream=$(_build_reality_stream "raw" "$sni" "$private_key" "$short_id")
+
+    jq -n --arg tag "$tag" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson stream "$stream" '
+        {
+            "tag": $tag,
+            "port": $port,
+            "protocol": "shadowsocks",
+            "settings": {
+                "method": $method,
+                "password": $password,
+                "network": "tcp,udp"
+            },
+            "streamSettings": $stream
+        }'
+}
+
+_build_ss2022_reality_link() {
+    local tag="$1"
+    local port name method password sni public_key short_id server_ip link_ip
+
+    port=$(_get_inbound_field "$tag" '.port')
+    [ -n "$port" ] || return 1
+
+    name=$(_get_tag_name "$tag")
+    method=$(_get_meta_field "$tag" method)
+    password=$(_get_meta_field "$tag" password)
+    sni=$(_get_meta_field "$tag" sni)
+    public_key=$(_get_meta_field "$tag" publicKey)
+    short_id=$(_get_meta_field "$tag" shortId)
+    server_ip=$(_get_meta_field "$tag" server)
+
+    [ -n "$method" ] || return 1
+    [ -n "$password" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
+
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+        "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
+}
+
+_add_ss2022_reality() {
+    [ -z "$server_ip" ] && _init_server_ip
+
+    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag method password inbound qx_link
+    protocol="ss2022_reality"
+    node_ip="$server_ip"
+
+    if [ -n "$server_ip" ]; then
+        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
+        node_ip=${custom_ip:-$server_ip}
+    else
+        _warn "未能自动检测到当前公网 IP，请手动输入。"
+        read -p "请输入服务器 IP: " node_ip
+    fi
+
+    port=$(_input_port)
+    sni="$DEFAULT_SNI"
+    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
+    sni=${custom_sni:-$DEFAULT_SNI}
+
+    default_name=$(_protocol_default_name "$protocol" "$port")
+    while true; do
+        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
+        name=${custom_name:-$default_name}
+        tag="$name"
+        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+            _error "节点名称已存在，请重新输入。"
+            continue
+        fi
+        break
+    done
+
+    method=$(_ss2022_reality_method)
+    password=$(_ss2022_reality_password)
+    _generate_reality_keys || return 1
+
+    inbound=$(_build_ss2022_reality_inbound "$tag" "$port" "$method" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
+    _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
+
+    qx_link=$(_build_ss2022_reality_link "$tag" 2>/dev/null)
+    _save_meta_bundle "$tag" "$name" "$qx_link" \
+        "protocol=${protocol}" \
+        "password=${password}" \
+        "publicKey=${REALITY_PUBLIC_KEY}" \
+        "shortId=${REALITY_SHORT_ID}" \
+        "server=${node_ip}" \
+        "sni=${sni}" \
+        "method=${method}"
+
+    _manage_xray_service restart
+    _success "SS2022+Reality 节点 [${name}] 添加成功。"
+    _show_share_link "$tag"
+}
+
+# ===================== 协议实现：Trojan + Reality =====================
+
+_trojan_reality_password() {
+    local custom_password
+    read -p "请输入 Trojan 密码 (回车自动生成): " custom_password
+    if [ -n "$custom_password" ]; then
+        printf '%s\n' "$custom_password"
+    else
+        openssl rand -base64 16
+    fi
+}
+
+_build_trojan_reality_inbound() {
+    local tag="$1" port="$2" password="$3" sni="$4" private_key="$5" short_id="$6"
+    local stream
+    stream=$(_build_reality_stream "raw" "$sni" "$private_key" "$short_id")
+
+    jq -n --arg tag "$tag" --argjson port "$port" --arg password "$password" --argjson stream "$stream" '
+        {
+            "tag": $tag,
+            "port": $port,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [
+                    {
+                        "password": $password
+                    }
+                ]
+            },
+            "streamSettings": $stream
+        }'
+}
+
+_build_trojan_reality_link() {
+    local tag="$1"
+    local port name password sni public_key short_id server_ip link_ip
+
+    port=$(_get_inbound_field "$tag" '.port')
+    [ -n "$port" ] || return 1
+
+    name=$(_get_tag_name "$tag")
+    password=$(_get_meta_field "$tag" password)
+    sni=$(_get_meta_field "$tag" sni)
+    public_key=$(_get_meta_field "$tag" publicKey)
+    short_id=$(_get_meta_field "$tag" shortId)
+    server_ip=$(_get_meta_field "$tag" server)
+
+    [ -n "$password" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
+
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    printf 'trojan=%s:%s, password=%s, over-tls=true, tls-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+        "$link_ip" "$port" "$password" "$sni" "$public_key" "$short_id" "$name"
+}
+
+_add_trojan_reality() {
+    [ -z "$server_ip" ] && _init_server_ip
+
+    local protocol node_ip custom_ip port sni custom_sni default_name custom_name name tag password inbound qx_link
+    protocol="trojan_reality"
+    node_ip="$server_ip"
+
+    if [ -n "$server_ip" ]; then
+        read -p "请输入服务器 IP (回车默认当前检测 IP: ${server_ip}): " custom_ip
+        node_ip=${custom_ip:-$server_ip}
+    else
+        _warn "未能自动检测到当前公网 IP，请手动输入。"
+        read -p "请输入服务器 IP: " node_ip
+    fi
+
+    port=$(_input_port)
+    sni="$DEFAULT_SNI"
+    read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
+    sni=${custom_sni:-$DEFAULT_SNI}
+
+    default_name=$(_protocol_default_name "$protocol" "$port")
+    while true; do
+        read -p "请输入节点名称 (默认: ${default_name}): " custom_name
+        name=${custom_name:-$default_name}
+        tag="$name"
+        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+            _error "节点名称已存在，请重新输入。"
+            continue
+        fi
+        break
+    done
+
+    password=$(_trojan_reality_password)
+    _generate_reality_keys || return 1
+
+    inbound=$(_build_trojan_reality_inbound "$tag" "$port" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
+    _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
+
+    qx_link=$(_build_trojan_reality_link "$tag" 2>/dev/null)
+    _save_meta_bundle "$tag" "$name" "$qx_link" \
+        "protocol=${protocol}" \
+        "password=${password}" \
+        "publicKey=${REALITY_PUBLIC_KEY}" \
+        "shortId=${REALITY_SHORT_ID}" \
+        "server=${node_ip}" \
+        "sni=${sni}"
+
+    _manage_xray_service restart
+    _success "Trojan+Reality 节点 [${name}] 添加成功。"
+    _show_share_link "$tag"
+}
+
+# ===================== 预留协议模板（示例） =====================
+
+# 后续新增协议时，按下面模式补充即可：
+# 1. _add_xxx
+# 2. _build_xxx_inbound
+# 3. _build_xxx_link
+# 4. 在 _protocol_add_node / _build_protocol_share_link / _protocol_name 中注册
+
+# ===================== 菜单与入口 =====================
+
+_add_protocol_menu() {
+    local choice
+    echo ""
+    echo -e "${YELLOW}══════════ 选择要添加的协议 ══════════${NC}"
+    echo -e "  ${GREEN}[1]${NC} SS2022 + Reality"
+    echo -e "  ${GREEN}[2]${NC} Trojan + Reality"
+    echo -e "  ${RED}[0]${NC} 返回"
+    echo ""
+    read -p "请选择 [0-2]: " choice
+
+    case "$choice" in
+        1) _protocol_add_node ss2022_reality ;;
+        2) _protocol_add_node trojan_reality ;;
+        0) return 0 ;;
+        *) _error "无效输入。"; return 1 ;;
+    esac
+}
+
 _xray_menu() {
     while true; do
         clear
         echo ""
         echo -e "=================================================="
-        echo -e " Xray 独立脚本 v${SCRIPT_VERSION}"
-        echo -e " 单协议: SS2022 + Reality"
+        echo -e " Xray 协议插件式脚本 v${SCRIPT_VERSION}"
+        echo -e " 当前协议组合: Reality"
         _show_xray_runtime_summary
         echo -e "=================================================="
         echo -e " ${CYAN}【服务控制】${NC}"
@@ -945,7 +1159,7 @@ _xray_menu() {
         _menu_item 4  "重启 Xray"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        _menu_item 5  "添加 SS2022+Reality 节点"
+        _menu_item 5  "添加节点（选择协议）"
         _menu_item 6  "查看所有节点"
         _menu_item 7  "删除节点"
         _menu_item 8  "修改节点端口"
@@ -963,10 +1177,10 @@ _xray_menu() {
             2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
             3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
             4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            5) _init_xray_config; _add_ss2022_reality; _pause ;;
-            6) _view_xray_nodes; _pause ;;
-            7) _delete_xray_node; _pause ;;
-            8) _modify_xray_port; _pause ;;
+            5) _init_xray_config; _add_protocol_menu; _pause ;;
+            6) _protocol_view_nodes; _pause ;;
+            7) _protocol_delete_node; _pause ;;
+            8) _protocol_modify_port; _pause ;;
             9) _update_script_self; _pause; exit 0 ;;
             10) _choose_ip_preference ;;
             88) _uninstall_xray; _pause ;;
@@ -982,6 +1196,7 @@ _main() {
     _detect_init_system
     _ensure_deps
     _install_script_shortcut
+    _protocol_validate_supported "$DEFAULT_PROTOCOL" || exit 1
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
