@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.9"
+SCRIPT_VERSION="0.1.11"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -821,6 +821,13 @@ _show_share_link() {
     echo ""
 }
 
+_finalize_added_node() {
+    local protocol_label="$1" name="$2" tag="$3"
+    _manage_xray_service restart
+    _success "${protocol_label} 节点 [${name}] 添加成功。"
+    _show_share_link "$tag"
+}
+
 _protocol_of_tag() {
     _get_meta_field "$1" protocol
 }
@@ -1106,9 +1113,7 @@ _add_ss2022_reality() {
         "sni=${sni}" \
         "method=${method}"
 
-    _manage_xray_service restart
-    _success "SS2022+Reality 节点 [${name}] 添加成功。"
-    _show_share_link "$tag"
+    _finalize_added_node "SS2022+Reality" "$name" "$tag"
 }
 
 # ===================== 协议实现：Trojan + Reality =====================
@@ -1196,9 +1201,7 @@ _add_trojan_reality() {
         "server=${node_ip}" \
         "sni=${sni}"
 
-    _manage_xray_service restart
-    _success "Trojan+Reality 节点 [${name}] 添加成功。"
-    _show_share_link "$tag"
+    _finalize_added_node "Trojan+Reality" "$name" "$tag"
 }
 
 # ===================== 协议实现：Vmess + Reality =====================
@@ -1276,9 +1279,7 @@ _add_vmess_reality() {
         "server=${node_ip}" \
         "sni=${sni}"
 
-    _manage_xray_service restart
-    _success "Vmess+Reality 节点 [${name}] 添加成功。"
-    _show_share_link "$tag"
+    _finalize_added_node "Vmess+Reality" "$name" "$tag"
 }
 
 # ===================== 协议实现：VLESS + XTLS-RPRX-Vision + Reality =====================
@@ -1358,9 +1359,7 @@ _add_vless_vision_reality() {
         "server=${node_ip}" \
         "sni=${sni}"
 
-    _manage_xray_service restart
-    _success "VLESS+Vision+Reality 节点 [${name}] 添加成功。"
-    _show_share_link "$tag"
+    _finalize_added_node "VLESS+Vision+Reality" "$name" "$tag"
 }
 
 # ===================== 预留协议模板（示例） =====================
