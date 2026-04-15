@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.5"
+SCRIPT_VERSION="0.1.7"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1154,7 +1154,7 @@ _build_trojan_reality_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'trojan=%s:%s, password=%s, over-tls=true, tls-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+    printf 'trojan=%s:%s, password=%s, over-tls=true, tls-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
         "$link_ip" "$port" "$password" "$sni" "$public_key" "$short_id" "$name"
 }
 
@@ -1255,7 +1255,7 @@ _build_vmess_reality_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'vmess=%s:%s, method=none, password=%s, obfs=over-tls, obfs-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+    printf 'vmess=%s:%s, method=none, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
         "$link_ip" "$port" "$uuid" "$sni" "$public_key" "$short_id" "$name"
 }
 
@@ -1358,7 +1358,7 @@ _build_vless_vision_reality_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'vless=%s:%s, method=none, password=%s, obfs=over-tls, obfs-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, vless-flow=xtls-rprx-vision, tag=%s\n' \
+    printf 'vless=%s:%s, method=none, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, vless-flow=xtls-rprx-vision, tag=%s\n' \
         "$link_ip" "$port" "$uuid" "$sni" "$public_key" "$short_id" "$name"
 }
 
