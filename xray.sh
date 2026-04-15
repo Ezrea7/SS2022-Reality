@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.2"
+SCRIPT_VERSION="0.1.3"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1064,6 +1064,10 @@ _add_ss2022_reality() {
     read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
     sni=${custom_sni:-$DEFAULT_SNI}
 
+    method=$(_ss2022_reality_method)
+    password=$(_ss2022_reality_password)
+    _generate_reality_keys || return 1
+
     default_name=$(_protocol_default_name "$protocol" "$port")
     while true; do
         read -p "请输入节点名称 (默认: ${default_name}): " custom_name
@@ -1075,10 +1079,6 @@ _add_ss2022_reality() {
         fi
         break
     done
-
-    method=$(_ss2022_reality_method)
-    password=$(_ss2022_reality_password)
-    _generate_reality_keys || return 1
 
     inbound=$(_build_ss2022_reality_inbound "$tag" "$port" "$method" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
@@ -1177,6 +1177,9 @@ _add_trojan_reality() {
     read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
     sni=${custom_sni:-$DEFAULT_SNI}
 
+    password=$(_trojan_reality_password)
+    _generate_reality_keys || return 1
+
     default_name=$(_protocol_default_name "$protocol" "$port")
     while true; do
         read -p "请输入节点名称 (默认: ${default_name}): " custom_name
@@ -1188,9 +1191,6 @@ _add_trojan_reality() {
         fi
         break
     done
-
-    password=$(_trojan_reality_password)
-    _generate_reality_keys || return 1
 
     inbound=$(_build_trojan_reality_inbound "$tag" "$port" "$password" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
@@ -1278,6 +1278,9 @@ _add_vmess_reality() {
     read -p "请输入伪装域名 SNI (默认: ${DEFAULT_SNI}): " custom_sni
     sni=${custom_sni:-$DEFAULT_SNI}
 
+    uuid=$(_input_uuid)
+    _generate_reality_keys || return 1
+
     default_name=$(_protocol_default_name "$protocol" "$port")
     while true; do
         read -p "请输入节点名称 (默认: ${default_name}): " custom_name
@@ -1289,9 +1292,6 @@ _add_vmess_reality() {
         fi
         break
     done
-
-    uuid=$(_input_uuid)
-    _generate_reality_keys || return 1
 
     inbound=$(_build_vmess_reality_inbound "$tag" "$port" "$uuid" "$sni" "$REALITY_PRIVATE_KEY" "$REALITY_SHORT_ID")
     _atomic_modify_json "$XRAY_CONFIG" ".inbounds += [$inbound]" || return 1
