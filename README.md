@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/Ezrea7/xTLS-Reality/refs/heads/main
 xtls
 ```
 
-# Quanumult X配置示例
+# Quanumult X  SS2022+Reality配置示例
 
 ### 脚本自动生成如下格式配置
 ```
