@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.2.10"
+SCRIPT_VERSION="0.3.7"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -35,7 +35,7 @@ _success() { echo -e "${GREEN}[成功] $1${NC}" >&2; }
 _warn()    { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _error()   { echo -e "${RED}[错误] $1${NC}" >&2; }
 
-trap 'rm -f "${XRAY_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
+trap 'rm -f "${XRAY_DIR}"/*.tmp.* "${SINGBOX_DIR}"/*.tmp.* "${META_DIR}"/*.tmp.* 2>/dev/null || true' EXIT
 
 # ===================== 基础与通用 =====================
 
@@ -172,7 +172,7 @@ _update_script_self() {
     ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || cp -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
     chmod +x "$SCRIPT_ALIAS_PATH" 2>/dev/null || true
 
-    _success "脚本已更新。当前快捷命令: ${SCRIPT_CMD_NAME} / ${SCRIPT_CMD_ALIAS}"
+    _success "脚本更新完成。当前快捷命令: ${SCRIPT_CMD_NAME} / ${SCRIPT_CMD_ALIAS}"
     _warn "请重新运行 ${SCRIPT_CMD_NAME} 或 ${SCRIPT_CMD_ALIAS} 以加载新版本。"
 }
 
@@ -272,8 +272,14 @@ _choose_ip_preference() {
     read -p "请选择 [0-2]: " choice
 
     case "$choice" in
-        1) _set_ip_preference ipv4 && _success "已设置 IPv4 优先。" || _error "设置 IPv4 优先失败。" ;;
-        2) _set_ip_preference ipv6 && _success "已设置 IPv6 优先。" || _error "设置 IPv6 优先失败。" ;;
+        1)
+            [ -n "$ip4" ] || { _error "当前未检测到可用的 IPv4 地址，无法设置 IPv4 优先。"; _pause; return 0; }
+            _set_ip_preference ipv4 && _success "IPv4 优先设置完成。" || _error "设置 IPv4 优先失败。"
+            ;;
+        2)
+            [ -n "$ip6" ] || { _error "当前未检测到可用的 IPv6 地址，无法设置 IPv6 优先。"; _pause; return 0; }
+            _set_ip_preference ipv6 && _success "IPv6 优先设置完成。" || _error "设置 IPv6 优先失败。"
+            ;;
         0) return 0 ;;
         *) _error "无效输入。" ;;
     esac
@@ -351,6 +357,44 @@ _atomic_modify_json() {
     fi
 }
 
+_check_port_occupied() {
+    local port="$1" proto="${2:-tcp}"
+    if command -v ss >/dev/null 2>&1; then
+        if ss -lntup 2>/dev/null | awk -v p=":${port}" '$0 ~ p {found=1} END{exit !found}'; then
+            return 0
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -lntup 2>/dev/null | awk -v p=":${port}" '$0 ~ p {found=1} END{exit !found}'; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_check_port_in_configs() {
+    local port="$1"
+    if [ -f "$XRAY_CONFIG" ] && jq -e --argjson p "$port" '.inbounds[] | select(.port == $p)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -f "$SINGBOX_CONFIG" ] && jq -e --argjson p "$port" '.inbounds[] | select(.listen_port == $p)' "$SINGBOX_CONFIG" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+_check_port_conflict() {
+    local port="$1" proto="${2:-tcp}"
+    if _check_port_in_configs "$port"; then
+        _error "端口 ${port} 已存在于当前节点配置中，请更换端口。"
+        return 0
+    fi
+    if _check_port_occupied "$port" "$proto"; then
+        _error "端口 ${port} 已被系统进程占用，请更换端口。"
+        return 0
+    fi
+    return 1
+}
+
 _input_port() {
     local port=""
     while true; do
@@ -360,6 +404,7 @@ _input_port() {
             _error "无效端口号。"
             continue
         fi
+        _check_port_conflict "$port" && continue
         echo "$port"
         return 0
     done
@@ -445,7 +490,7 @@ _init_xray_config() {
   ]
 }
 JSON
-        _success "Xray 配置文件已初始化。"
+        _success "Xray 配置文件初始化完成。"
     fi
 
     mkdir -p "$META_DIR"
@@ -548,6 +593,20 @@ _show_xray_runtime_summary() {
     echo -e "--------------------------------------------------"
 }
 
+_require_xray() {
+    [ -x "$XRAY_BIN" ] && return 0
+    _warn "当前未安装 Xray 内核。"
+    _warn "请先执行 [1] 安装/更新 Xray 内核。"
+    return 1
+}
+
+_require_singbox() {
+    [ -x "$SINGBOX_BIN" ] && return 0
+    _warn "当前未安装 Sing-box 内核。"
+    _warn "请先执行 [2] 安装/更新 Sing-box 核心。"
+    return 1
+}
+
 _manage_xray_service() {
     local action="$1" result=1
 
@@ -582,9 +641,9 @@ _manage_xray_service() {
     [ "$result" -eq 0 ] || { _error "Xray 服务${action}失败。"; return 1; }
 
     case "$action" in
-        start) _success "Xray 服务已启动。" ;;
-        stop) _success "Xray 服务已停止。" ;;
-        restart) _success "Xray 服务已重启。" ;;
+        start) _success "Xray 服务启动成功。" ;;
+        stop) _success "Xray 服务停止成功。" ;;
+        restart) _success "Xray 服务重启成功。" ;;
     esac
 }
 
@@ -601,6 +660,8 @@ Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
 NoNewPrivileges=true
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target
@@ -673,9 +734,9 @@ _manage_singbox_service() {
     [ "$result" -eq 0 ] || { _error "Sing-box 服务${action}失败。"; return 1; }
 
     case "$action" in
-        start) _success "Sing-box 服务已启动。" ;;
-        stop) _success "Sing-box 服务已停止。" ;;
-        restart) _success "Sing-box 服务已重启。" ;;
+        start) _success "Sing-box 服务启动成功。" ;;
+        stop) _success "Sing-box 服务停止成功。" ;;
+        restart) _success "Sing-box 服务重启成功。" ;;
     esac
 }
 
@@ -695,7 +756,7 @@ _init_singbox_config() {
   ]
 }
 JSON
-        _success "Sing-box 配置文件已初始化。"
+        _success "Sing-box 配置文件初始化完成。"
     fi
 }
 
@@ -752,11 +813,11 @@ _install_or_update_singbox() {
     _init_singbox_config
     _create_singbox_service
     _manage_singbox_service restart >/dev/null 2>&1 || _manage_singbox_service start >/dev/null 2>&1 || true
-    _success "Sing-box 安装/更新成功。当前版本: $($SINGBOX_BIN version 2>/dev/null | head -n1)"
+    _success "Sing-box 核心安装/更新完成。当前版本: $($SINGBOX_BIN version 2>/dev/null | head -n1)"
 }
 
 _install_or_update_xray() {
-    local is_first_install=false current_ver arch xray_arch download_url dgst_url tmp_dir tmp_zip version dgst_content expected_hash actual_hash
+    local is_first_install=false current_ver arch xray_arch download_url tmp_dir tmp_zip version
     [ ! -f "$XRAY_BIN" ] && is_first_install=true
 
     if [ "$is_first_install" = true ]; then
@@ -767,7 +828,6 @@ _install_or_update_xray() {
     fi
 
     command -v unzip >/dev/null 2>&1 || _pkg_install unzip
-    command -v sha256sum >/dev/null 2>&1 || _pkg_install coreutils
 
     arch=$(uname -m)
     xray_arch="64"
@@ -778,7 +838,6 @@ _install_or_update_xray() {
     esac
 
     download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip"
-    dgst_url="${download_url}.dgst"
     tmp_dir=$(mktemp -d)
     tmp_zip="${tmp_dir}/xray.zip"
 
@@ -788,25 +847,6 @@ _install_or_update_xray() {
         rm -rf "$tmp_dir"
         return 1
     }
-
-    dgst_content=$(_download_to "$dgst_url" "${tmp_dir}/xray.zip.dgst" >/dev/null 2>&1 && cat "${tmp_dir}/xray.zip.dgst" 2>/dev/null)
-    if [ -n "$dgst_content" ] && command -v sha256sum >/dev/null 2>&1; then
-        _info "正在进行 SHA256 完整性校验..."
-        expected_hash=$(printf '%s\n' "$dgst_content" | grep "SHA2-256" | head -1 | awk -F'= ' '{print $2}' | tr -d '[:space:]')
-        if [ -n "$expected_hash" ]; then
-            actual_hash=$(sha256sum "$tmp_zip" | awk '{print $1}')
-            if [ "$(printf '%s' "$expected_hash" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$actual_hash" | tr 'A-Z' 'a-z')" ]; then
-                _error "SHA256 校验失败，已取消安装。"
-                rm -rf "$tmp_dir"
-                return 1
-            fi
-            _success "SHA256 校验通过。"
-        else
-            _warn "校验文件格式异常，跳过校验。"
-        fi
-    else
-        _warn "未获取到校验文件，跳过 SHA256 校验。"
-    fi
 
     unzip -qo "$tmp_zip" -d "$tmp_dir" || {
         _error "Xray 解压失败。"
@@ -823,7 +863,7 @@ _install_or_update_xray() {
     rm -rf "$tmp_dir"
 
     version=$($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')
-    _success "Xray-core v${version} 安装/更新成功。"
+    _success "Xray 内核安装/更新完成，当前版本: v${version}。"
 
     _init_xray_config
     _create_xray_service
@@ -832,7 +872,7 @@ _install_or_update_xray() {
         _info "首次安装 Xray，正在初始化配置与服务..."
         _set_ip_preference ipv4 >/dev/null 2>&1 || true
         _manage_xray_service start
-        _success "Xray 首次安装完成并已启动。"
+        _success "Xray 首次安装已完成，服务已启动。"
     else
         _manage_xray_service restart
     fi
@@ -880,24 +920,24 @@ _cleanup_singbox_files() {
 
 _uninstall_xray() {
     echo ""
-    _warn "即将卸载 Xray 核心及其所有配置！"
-    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
+    _warn "即将卸载 Xray 内核及相关配置。"
+    printf "${YELLOW}确定要继续吗? (y/N): ${NC}"
     read -r confirm
     _confirm_yes "$confirm" || { _info "卸载已取消。"; return; }
 
     _cleanup_xray_files
-    _success "Xray 核心已完全卸载！"
+    _success "Xray 内核卸载完成。"
 }
 
 _uninstall_singbox() {
     echo ""
-    _warn "即将卸载 Sing-box 核心及其所有配置！"
-    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
+    _warn "即将卸载 Sing-box 内核及相关配置。"
+    printf "${YELLOW}确定要继续吗? (y/N): ${NC}"
     read -r confirm
     _confirm_yes "$confirm" || { _info "卸载已取消。"; return; }
 
     _cleanup_singbox_files
-    _success "Sing-box 核心已完全卸载！"
+    _success "Sing-box 内核卸载完成。"
 }
 
 _uninstall_script() {
@@ -1142,7 +1182,7 @@ _show_share_link() {
 _finalize_added_node() {
     local protocol_label="$1" name="$2" tag="$3"
     _manage_xray_service restart
-    _success "${protocol_label} 节点 [${name}] 添加成功。"
+    _success "${protocol_label} 节点添加完成：${name}。"
     _show_share_link "$tag"
 }
 
@@ -1199,7 +1239,7 @@ _build_anytls_reality_link() {
 _finalize_added_singbox_node() {
     local protocol_label="$1" name="$2" tag="$3"
     _manage_singbox_service restart
-    _success "${protocol_label} 节点 [${name}] 添加成功。"
+    _success "${protocol_label} 节点添加完成：${name}。"
     echo ""
     echo -e "  ${YELLOW}Quantumult X:${NC} $(_build_anytls_reality_link "$tag")"
     echo ""
@@ -1242,12 +1282,12 @@ _protocol_add_node() {
 
 _protocol_view_all_nodes() {
     if ! _has_nodes; then
-        _warn "当前没有 Xray 节点。"
+        _warn "当前没有节点。"
         return
     fi
 
     echo ""
-    echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
+    echo -e "${YELLOW}══════════════════ 节点列表 ══════════════════${NC}"
     local count=0 tag port name link display_proto
     while IFS= read -r tag; do
         count=$((count + 1))
@@ -1304,12 +1344,12 @@ _protocol_view_nodes() {
     local choice i=1
     local -a tags
     if ! _has_nodes; then
-        _warn "当前没有 Xray 节点。"
+        _warn "当前没有节点。"
         return
     fi
 
     mapfile -t tags < <(_list_tags)
-    [ "${#tags[@]}" -gt 0 ] || { _warn "当前没有 Xray 节点。"; return; }
+    [ "${#tags[@]}" -gt 0 ] || { _warn "当前没有节点。"; return; }
 
     echo ""
     echo -e "${YELLOW}══════════ 查看节点 ══════════${NC}"
@@ -1338,7 +1378,7 @@ _protocol_view_nodes() {
 
 _protocol_delete_node() {
     if ! _has_nodes; then
-        _warn "当前没有 Xray 节点。"
+        _warn "当前没有节点。"
         return
     fi
 
@@ -1351,12 +1391,12 @@ _protocol_delete_node() {
     _delete_inbound_by_tag "$target_tag" || return 1
     _atomic_modify_json "$META_FILE" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
     _restart_node_backend "$target_tag"
-    _success "节点 [${target_name}] 已删除。"
+    _success "节点删除完成：${target_name}。"
 }
 
 _protocol_modify_port() {
     if ! _has_nodes; then
-        _warn "当前没有 Xray 节点。"
+        _warn "当前没有节点。"
         return
     fi
 
@@ -1394,7 +1434,7 @@ _protocol_modify_port() {
     }
 
     _restart_node_backend "$new_tag"
-    _success "节点 [${new_name}] 端口已改为 ${new_port}。"
+    _success "节点端口修改完成：${new_name} -> ${new_port}。"
 }
 
 # ===================== 协议实现：SS2022 + Reality =====================
@@ -1415,6 +1455,7 @@ _build_ss2022_reality_inbound() {
     jq -n --arg tag "$tag" --argjson port "$port" --arg method "$method" --arg password "$password" --argjson stream "$stream" '
         {
             "tag": $tag,
+            "listen": "::",
             "port": $port,
             "protocol": "shadowsocks",
             "settings": {
@@ -1505,6 +1546,7 @@ _build_trojan_reality_inbound() {
     jq -n --arg tag "$tag" --argjson port "$port" --arg password "$password" --argjson stream "$stream" '
         {
             "tag": $tag,
+            "listen": "::",
             "port": $port,
             "protocol": "trojan",
             "settings": {
@@ -1583,6 +1625,7 @@ _build_vmess_reality_inbound() {
     jq -n --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --argjson stream "$stream" '
         {
             "tag": $tag,
+            "listen": "::",
             "port": $port,
             "protocol": "vmess",
             "settings": {
@@ -1661,6 +1704,7 @@ _build_vless_vision_reality_inbound() {
     jq -n --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --argjson stream "$stream" '
         {
             "tag": $tag,
+            "listen": "::",
             "port": $port,
             "protocol": "vless",
             "settings": {
@@ -1791,6 +1835,7 @@ _add_anytls_reality() {
     protocol="anytls_reality"
 
     if [ ! -x "$SINGBOX_BIN" ]; then
+        _warn "当前未安装 Sing-box 内核。"
         _warn "AnyTLS + Reality 需要先安装 Sing-box 核心。"
         _warn "请先执行 [2] 安装/更新 Sing-box 核心。"
         return 1
@@ -1836,24 +1881,21 @@ _add_protocol_menu() {
     local choice
     echo ""
     echo -e "${YELLOW}══════════ 选择要添加的协议 ══════════${NC}"
-    echo -e " ${CYAN}【Xray 内核协议】${NC}"
+    echo -e " ${CYAN}【Xray 内核】${NC}"
     echo -e "  ${GREEN}[1]${NC} VLESS + Vision + Reality"
     echo -e "  ${GREEN}[2]${NC} SS2022 + Reality"
     echo -e "  ${GREEN}[3]${NC} Trojan + Reality"
     echo -e "  ${GREEN}[4]${NC} Vmess + Reality"
     echo ""
-    echo -e " ${CYAN}【Sing-box 内核协议】${NC}"
+    echo -e " ${CYAN}【Sing-box 内核】${NC}"
     echo -e "  ${GREEN}[5]${NC} AnyTLS + Reality"
-    echo -e "  ${RED}[0]${NC} 返回"
+    echo -e "  ${RED}[0]${NC} 返回上一级"
     echo ""
     read -p "请选择 [0-5]: " choice
 
     case "$choice" in
         1|2|3|4)
-            if [ ! -x "$XRAY_BIN" ]; then
-                _warn "当前未安装 Xray 内核，请先执行 [1] 安装/更新 Xray 内核。"
-                return 1
-            fi
+            _require_xray || return 1
             _init_xray_config
             case "$choice" in
                 1) _protocol_add_node vless_vision_reality ;;
@@ -1863,10 +1905,7 @@ _add_protocol_menu() {
             esac
             ;;
         5)
-            if [ ! -x "$SINGBOX_BIN" ]; then
-                _warn "当前未安装 Sing-box 内核，请先执行 [2] 安装/更新 Sing-box 核心。"
-                return 1
-            fi
+            _require_singbox || return 1
             _protocol_add_node anytls_reality
             ;;
         0) return 0 ;;
@@ -1879,29 +1918,35 @@ _xray_menu() {
         clear
         echo ""
         echo -e "=================================================="
-        echo -e " Xray 协议插件式脚本 v${SCRIPT_VERSION}"
-        echo -e " 当前协议组合: Reality"
+        echo -e " XTLS Reality 协议管理脚本 v${SCRIPT_VERSION}"
+        echo -e " 当前协议组合: Xray + Sing-box / Reality"
         _show_xray_runtime_summary
         echo -e "=================================================="
         echo -e " ${CYAN}【核心管理】${NC}"
         _menu_item 1  "安装/更新 Xray 内核"
         _menu_item 2  "安装/更新 Sing-box 核心"
         echo ""
-        echo -e " ${CYAN}【服务控制】${NC}"
-        _menu_item 3  "启动 Xray"
-        _menu_item 4  "停止 Xray"
-        _menu_item 5  "重启 Xray"
+        echo -e " ${CYAN}【Xray 服务管理】${NC}"
+        _menu_item 3  "启动 Xray 服务"
+        _menu_item 4  "停止 Xray 服务"
+        _menu_item 5  "重启 Xray 服务"
+        echo ""
+        echo -e " ${CYAN}【Sing-box 服务管理】${NC}"
+        _menu_item 6  "启动 Sing-box 服务"
+        _menu_item 7  "停止 Sing-box 服务"
+        _menu_item 8  "重启 Sing-box 服务"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        _menu_item 6  "添加节点（选择协议）"
-        _menu_item 7  "查看所有节点"
-        _menu_item 8  "删除节点"
-        _menu_item 9  "修改节点端口"
-        _menu_item 10 "更新脚本"
-        _menu_item 11 "设置网络优先级 (IPv4/IPv6)"
+        _menu_item 9  "添加节点（选择协议）"
+        _menu_item 10 "查看节点"
+        _menu_item 11 "删除节点"
+        _menu_item 12 "修改节点端口"
+        _menu_item 13 "设置网络优先级 (IPv4/IPv6)"
         echo ""
+        echo -e " ${CYAN}【脚本与卸载】${NC}"
+        _menu_danger 55 "更新脚本"
         _menu_danger 77 "卸载 Sing-box 内核"
-        _menu_danger 88 "卸载 Xray"
+        _menu_danger 88 "卸载 Xray 内核"
         _menu_danger 99 "卸载脚本"
         _menu_exit 0 "退出脚本"
         echo -e "=================================================="
@@ -1913,12 +1958,15 @@ _xray_menu() {
             3) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
             4) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
             5) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            6) _add_protocol_menu; _pause ;;
-            7) _protocol_view_nodes; _pause ;;
-            8) _protocol_delete_node; _pause ;;
-            9) _protocol_modify_port; _pause ;;
-            10) _update_script_self; _pause; exit 0 ;;
-            11) _choose_ip_preference ;;
+            6) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service start; _pause ;;
+            7) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service stop; _pause ;;
+            8) [ -f "$SINGBOX_BIN" ] && _manage_singbox_service restart; _pause ;;
+            9) _add_protocol_menu; _pause ;;
+            10) _protocol_view_nodes; _pause ;;
+            11) _protocol_delete_node; _pause ;;
+            12) _protocol_modify_port; _pause ;;
+            13) _choose_ip_preference ;;
+            55) _update_script_self; _pause; exit 0 ;;
             77) _uninstall_singbox; _pause ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
