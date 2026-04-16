@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.3.7"
+SCRIPT_VERSION="0.3.9"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1184,6 +1184,10 @@ _finalize_added_node() {
     _manage_xray_service restart
     _success "${protocol_label} 节点添加完成：${name}。"
     _show_share_link "$tag"
+    if [ "$(_protocol_of_tag "$tag")" = "vless_vision_reality" ]; then
+        echo -e "  ${YELLOW}标准分享链接:${NC} $(_build_vless_vision_reality_std_link "$tag")"
+        echo ""
+    fi
 }
 
 _protocol_of_tag() {
@@ -1288,7 +1292,7 @@ _protocol_view_all_nodes() {
 
     echo ""
     echo -e "${YELLOW}══════════════════ 节点列表 ══════════════════${NC}"
-    local count=0 tag port name link display_proto
+    local count=0 tag port name link display_proto std_link
     while IFS= read -r tag; do
         count=$((count + 1))
         port=$(_get_inbound_port "$tag")
@@ -1304,6 +1308,10 @@ _protocol_view_all_nodes() {
         else
             echo -e "      ${RED}Quantumult X: 无法生成链接${NC}"
         fi
+        if [ "$(_protocol_of_tag "$tag")" = "vless_vision_reality" ]; then
+            std_link=$(_build_vless_vision_reality_std_link "$tag")
+            [ -n "$std_link" ] && echo -e "      ${YELLOW}标准分享链接:${NC} ${std_link}"
+        fi
     done < <(_list_tags)
 }
 
@@ -1318,7 +1326,7 @@ _restart_node_backend() {
 }
 
 _protocol_view_one_node_by_tag() {
-    local target_tag="$1" port name link display_proto
+    local target_tag="$1" port name link display_proto std_link
     [ -n "$target_tag" ] || return 1
     port=$(_get_inbound_port "$target_tag")
     name=$(_get_tag_name "$target_tag")
@@ -1336,6 +1344,10 @@ _protocol_view_one_node_by_tag() {
         echo -e "  ${YELLOW}Quantumult X:${NC} ${link}"
     else
         echo -e "  ${RED}Quantumult X: 无法生成链接${NC}"
+    fi
+    if [ "$(_protocol_of_tag "$target_tag")" = "vless_vision_reality" ]; then
+        std_link=$(_build_vless_vision_reality_std_link "$target_tag")
+        [ -n "$std_link" ] && echo -e "  ${YELLOW}标准分享链接:${NC} ${std_link}"
     fi
     echo ""
 }
@@ -1718,6 +1730,33 @@ _build_vless_vision_reality_inbound() {
             },
             "streamSettings": $stream
         }'
+}
+
+_build_vless_vision_reality_std_link() {
+    local tag="$1"
+    local port name uuid sni public_key short_id server_ip link_ip encoded_name
+
+    port=$(_get_inbound_field "$tag" '.port')
+    [ -n "$port" ] || return 1
+
+    name=$(_get_tag_name "$tag")
+    uuid=$(_get_meta_field "$tag" uuid)
+    sni=$(_get_meta_field "$tag" sni)
+    public_key=$(_get_meta_field "$tag" publicKey)
+    short_id=$(_get_meta_field "$tag" shortId)
+    server_ip=$(_get_meta_field "$tag" server)
+
+    [ -n "$uuid" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
+
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    encoded_name=$(printf '%s' "$name" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/?/%3F/g; s/&/%26/g; s/+/%2B/g')
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s\n' \
+        "$uuid" "$link_ip" "$port" "$sni" "$public_key" "$short_id" "$encoded_name"
 }
 
 _build_vless_vision_reality_link() {
