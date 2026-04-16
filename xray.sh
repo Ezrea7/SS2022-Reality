@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.2.2"
+SCRIPT_VERSION="0.2.3"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1837,11 +1837,26 @@ _add_protocol_menu() {
     read -p "请选择 [0-5]: " choice
 
     case "$choice" in
-        1) _protocol_add_node vless_vision_reality ;;
-        2) _protocol_add_node ss2022_reality ;;
-        3) _protocol_add_node trojan_reality ;;
-        4) _protocol_add_node vmess_reality ;;
-        5) _protocol_add_node anytls_reality ;;
+        1|2|3|4)
+            if [ ! -x "$XRAY_BIN" ]; then
+                _warn "当前未安装 Xray 内核，请先执行 [1] 安装/更新 Xray 内核。"
+                return 1
+            fi
+            _init_xray_config
+            case "$choice" in
+                1) _protocol_add_node vless_vision_reality ;;
+                2) _protocol_add_node ss2022_reality ;;
+                3) _protocol_add_node trojan_reality ;;
+                4) _protocol_add_node vmess_reality ;;
+            esac
+            ;;
+        5)
+            if [ ! -x "$SINGBOX_BIN" ]; then
+                _warn "当前未安装 Sing-box 内核，请先执行 [2] 安装/更新 Sing-box 核心。"
+                return 1
+            fi
+            _protocol_add_node anytls_reality
+            ;;
         0) return 0 ;;
         *) _error "无效输入。"; return 1 ;;
     esac
@@ -1886,7 +1901,7 @@ _xray_menu() {
             3) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
             4) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
             5) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            6) _init_xray_config; _add_protocol_menu; _pause ;;
+            6) _add_protocol_menu; _pause ;;
             7) _protocol_view_nodes; _pause ;;
             8) _protocol_delete_node; _pause ;;
             9) _protocol_modify_port; _pause ;;
