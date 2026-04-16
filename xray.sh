@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.1.11"
+SCRIPT_VERSION="0.2.2"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -16,6 +16,10 @@ XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_PID_FILE="/tmp/xray.pid"
+SINGBOX_BIN="/usr/local/bin/sing-box"
+SINGBOX_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
+SINGBOX_PID_FILE="/tmp/sing-box.pid"
 DEFAULT_SNI="support.apple.com"
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
 DEFAULT_PROTOCOL="ss2022_reality"
@@ -284,6 +288,54 @@ _init_server_ip() {
     fi
 }
 
+_get_os_pretty_name() {
+    local os_name os_ver
+    if [ -r /etc/os-release ]; then
+        os_name=$(awk -F= '/^NAME=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
+        os_ver=$(awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
+        [ -n "$os_name" ] && {
+            [ -n "$os_ver" ] && printf '%s v%s\n' "$os_name" "$os_ver" || printf '%s\n' "$os_name"
+            return 0
+        }
+    fi
+    uname -s
+}
+
+_get_singbox_core_version() {
+    [ -x "$SINGBOX_BIN" ] || { echo "未安装"; return 0; }
+    local version
+    version=$($SINGBOX_BIN version 2>/dev/null | head -n1 | awk '{print $3}')
+    [ -n "$version" ] && echo "v${version}" || echo "未知版本"
+}
+
+_get_singbox_service_status() {
+    [ -x "$SINGBOX_BIN" ] || { echo "未安装"; return 0; }
+
+    local active=""
+    case "$INIT_SYSTEM" in
+        systemd)
+            systemctl is-active --quiet sing-box >/dev/null 2>&1 && active=1 || active=0
+            ;;
+        openrc)
+            rc-service sing-box status >/dev/null 2>&1 && active=1 || active=0
+            ;;
+        *)
+            pgrep -f "$SINGBOX_BIN" >/dev/null 2>&1 && active=1 || active=0
+            ;;
+    esac
+
+    if [ "$active" = "1" ]; then
+        echo "● 运行中"
+    else
+        echo "○ 未运行"
+    fi
+}
+
+_get_singbox_node_count() {
+    [ -f "$SINGBOX_CONFIG" ] || { echo "0"; return 0; }
+    jq -r '.inbounds | length' "$SINGBOX_CONFIG" 2>/dev/null || echo "0"
+}
+
 # ===================== Xray 核心与服务 =====================
 
 _atomic_modify_json() {
@@ -365,7 +417,7 @@ _input_node_name() {
         read -p "请输入节点名称 (默认: ${default_name}): " custom_name
         name=${custom_name:-$default_name}
         tag="$name"
-        if jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+        if _list_tags | grep -Fxq "$tag"; then
             _error "节点名称已存在，请重新输入。"
             continue
         fi
@@ -486,7 +538,12 @@ _get_xray_service_status() {
 }
 
 _show_xray_runtime_summary() {
+    local os_info singbox_status
+    os_info=$(_get_os_pretty_name)
+    singbox_status="$(_get_singbox_service_status) ($(_get_singbox_node_count)节点)"
+    echo -e " 系统: ${CYAN}${os_info}${NC}  |  模式: ${CYAN}${INIT_SYSTEM}${NC}"
     echo -e " Xray ${YELLOW}$(_get_xray_core_version)${NC}: ${GREEN}$(_get_xray_service_status)${NC} ($(_get_xray_node_count)节点)"
+    echo -e " Sing-box ${YELLOW}$(_get_singbox_core_version)${NC}: ${GREEN}${singbox_status}${NC}"
     echo -e "--------------------------------------------------"
 }
 
@@ -528,6 +585,173 @@ _manage_xray_service() {
         stop) _success "Xray 服务已停止。" ;;
         restart) _success "Xray 服务已重启。" ;;
     esac
+}
+
+_create_singbox_systemd_service() {
+    cat > /etc/systemd/system/sing-box.service <<EOF2
+[Unit]
+Description=Sing-box Service
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+ExecStart=${SINGBOX_BIN} run -c ${SINGBOX_CONFIG}
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable sing-box >/dev/null 2>&1 || true
+}
+
+_create_singbox_openrc_service() {
+    cat > /etc/init.d/sing-box <<EOF2
+#!/sbin/openrc-run
+description="Sing-box Service"
+command="${SINGBOX_BIN}"
+command_args="run -c ${SINGBOX_CONFIG}"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=0
+pidfile="${SINGBOX_PID_FILE}"
+output_log="/dev/null"
+error_log="/dev/null"
+
+depend() {
+    need net
+    after firewall
+}
+EOF2
+    chmod +x /etc/init.d/sing-box
+    rc-update add sing-box default >/dev/null 2>&1 || true
+}
+
+_create_singbox_service() {
+    case "$INIT_SYSTEM" in
+        systemd) _create_singbox_systemd_service ;;
+        openrc) _create_singbox_openrc_service ;;
+        *) _warn "未检测到 systemd/openrc，请手动管理 Sing-box 进程。" ;;
+    esac
+}
+
+_manage_singbox_service() {
+    local action="$1" result=1
+
+    [ -x "$SINGBOX_BIN" ] || { _error "Sing-box 内核未安装。"; return 1; }
+    [ -z "$INIT_SYSTEM" ] && _detect_init_system
+
+    [ "$action" = "status" ] || _info "正在使用 ${INIT_SYSTEM} 执行: ${action}..."
+
+    case "$INIT_SYSTEM" in
+        systemd)
+            if [ "$action" = "status" ]; then
+                systemctl status sing-box --no-pager -l
+                return
+            fi
+            systemctl "$action" sing-box >/dev/null 2>&1
+            result=$?
+            ;;
+        openrc)
+            if [ "$action" = "status" ]; then
+                rc-service sing-box status
+                return
+            fi
+            rc-service sing-box "$action" >/dev/null 2>&1
+            result=$?
+            ;;
+        *)
+            _warn "未检测到服务管理器，跳过 ${action}。"
+            return 0
+            ;;
+    esac
+
+    [ "$result" -eq 0 ] || { _error "Sing-box 服务${action}失败。"; return 1; }
+
+    case "$action" in
+        start) _success "Sing-box 服务已启动。" ;;
+        stop) _success "Sing-box 服务已停止。" ;;
+        restart) _success "Sing-box 服务已重启。" ;;
+    esac
+}
+
+_init_singbox_config() {
+    mkdir -p "$SINGBOX_DIR"
+    if [ ! -s "$SINGBOX_CONFIG" ]; then
+        cat > "$SINGBOX_CONFIG" <<'JSON'
+{
+  "log": {
+    "disabled": true
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "type": "direct"
+    }
+  ]
+}
+JSON
+        _success "Sing-box 配置文件已初始化。"
+    fi
+}
+
+_install_or_update_singbox() {
+    if [ -f "${SINGBOX_BIN}" ]; then
+        local current_ver=$(${SINGBOX_BIN} version 2>/dev/null | head -n1 | awk '{print $3}')
+        _info "当前 Sing-box 版本: v${current_ver}，正在检查更新..."
+    else
+        _info "Sing-box 核心未安装，正在执行首次安装..."
+    fi
+
+    _info "--- 安装/更新 Sing-box 核心 ---"
+    local arch arch_tag libc_suffix api_url search_pattern release_info download_url checksum_url checksums dl_filename expected_hash actual_hash temp_dir
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) arch_tag='amd64' ;;
+        aarch64|arm64) arch_tag='arm64' ;;
+        armv7l) arch_tag='armv7' ;;
+        *) _error "不支持的架构：$arch"; return 1 ;;
+    esac
+
+    libc_suffix=""
+    if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then
+        libc_suffix="-musl"
+    fi
+
+    api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+    search_pattern="linux-${arch_tag}${libc_suffix}.tar.gz"
+    release_info=$(curl -s "$api_url")
+    download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"${search_pattern}\")) | .browser_download_url" | head -1)
+    checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith("checksums.txt")) | .browser_download_url' | head -1)
+
+    [ -n "$download_url" ] || { _error "无法获取 sing-box 下载链接。"; return 1; }
+    _download_to "$download_url" /tmp/sing-box.tar.gz || { _error "sing-box 下载失败。"; return 1; }
+
+    if [ -n "$checksum_url" ]; then
+        checksums=$(_download_to "$checksum_url" /tmp/sing-box.checksums >/dev/null 2>&1 && cat /tmp/sing-box.checksums 2>/dev/null)
+        if [ -n "$checksums" ]; then
+            dl_filename=$(basename "$download_url")
+            expected_hash=$(echo "$checksums" | grep "$dl_filename" | awk '{print $1}')
+            if [ -n "$expected_hash" ]; then
+                actual_hash=$(sha256sum /tmp/sing-box.tar.gz | awk '{print $1}')
+                [ "$expected_hash" = "$actual_hash" ] || { _error "sing-box SHA256 校验失败。"; rm -f /tmp/sing-box.tar.gz /tmp/sing-box.checksums; return 1; }
+            fi
+        fi
+    fi
+
+    temp_dir=$(mktemp -d)
+    tar -xzf /tmp/sing-box.tar.gz -C "$temp_dir" || { rm -rf "$temp_dir" /tmp/sing-box.tar.gz /tmp/sing-box.checksums; _error "sing-box 解压失败。"; return 1; }
+    mv "$temp_dir"/sing-box-*/sing-box "$SINGBOX_BIN" || { rm -rf "$temp_dir" /tmp/sing-box.tar.gz /tmp/sing-box.checksums; _error "未找到 sing-box 二进制。"; return 1; }
+    chmod +x "$SINGBOX_BIN"
+    rm -rf "$temp_dir" /tmp/sing-box.tar.gz /tmp/sing-box.checksums
+
+    _init_singbox_config
+    _create_singbox_service
+    _manage_singbox_service restart >/dev/null 2>&1 || _manage_singbox_service start >/dev/null 2>&1 || true
+    _success "Sing-box 安装/更新成功。当前版本: $($SINGBOX_BIN version 2>/dev/null | head -n1)"
 }
 
 _install_or_update_xray() {
@@ -629,6 +853,22 @@ _cleanup_xray_files() {
     rm -rf "$XRAY_DIR"
 }
 
+_cleanup_singbox_files() {
+    _manage_singbox_service stop >/dev/null 2>&1 || true
+
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable sing-box >/dev/null 2>&1
+        rm -f /etc/systemd/system/sing-box.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-update del sing-box default >/dev/null 2>&1
+        rm -f /etc/init.d/sing-box
+    fi
+
+    rm -f "$SINGBOX_BIN" "$SINGBOX_PID_FILE"
+    rm -rf "$SINGBOX_DIR"
+}
+
 _uninstall_xray() {
     echo ""
     _warn "即将卸载 Xray 核心及其所有配置！"
@@ -640,15 +880,28 @@ _uninstall_xray() {
     _success "Xray 核心已完全卸载！"
 }
 
+_uninstall_singbox() {
+    echo ""
+    _warn "即将卸载 Sing-box 核心及其所有配置！"
+    printf "${YELLOW}确定要卸载吗? (y/N): ${NC}"
+    read -r confirm
+    _confirm_yes "$confirm" || { _info "卸载已取消。"; return; }
+
+    _cleanup_singbox_files
+    _success "Sing-box 核心已完全卸载！"
+}
+
 _uninstall_script() {
     _warn "！！！警告！！！"
-    _warn "本操作将停止并禁用 Xray 服务，"
+    _warn "本操作将停止并禁用 Xray / Sing-box 服务，"
     _warn "删除所有相关文件（包括二进制、配置文件、快捷命令及脚本本体）。"
 
     echo ""
     echo "即将删除以下内容："
     echo -e "  ${RED}-${NC} Xray 配置目录: ${XRAY_DIR}"
     echo -e "  ${RED}-${NC} Xray 二进制: ${XRAY_BIN}"
+    echo -e "  ${RED}-${NC} Sing-box 配置目录: ${SINGBOX_DIR}"
+    echo -e "  ${RED}-${NC} Sing-box 二进制: ${SINGBOX_BIN}"
     echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_INSTALL_PATH}"
     [ "$SCRIPT_ALIAS_PATH" != "$SCRIPT_INSTALL_PATH" ] && echo -e "  ${RED}-${NC} 系统快捷命令: ${SCRIPT_ALIAS_PATH}"
     [ -n "$SELF_SCRIPT_PATH" ] && [ -f "$SELF_SCRIPT_PATH" ] && echo -e "  ${RED}-${NC} 管理脚本: ${SELF_SCRIPT_PATH}"
@@ -659,6 +912,7 @@ _uninstall_script() {
     _confirm_yes "$confirm_main" || { _info "卸载已取消。"; return; }
 
     _cleanup_xray_files
+    _cleanup_singbox_files
 
     _info "正在清理快捷命令与脚本本体..."
     rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_ALIAS_PATH"
@@ -705,8 +959,13 @@ _build_reality_stream() {
 }
 
 _get_inbound_field() {
-    local tag="$1" field="$2"
-    jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
+    local tag="$1" field="$2" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    if [ "$protocol" = "anytls_reality" ]; then
+        jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$SINGBOX_CONFIG" 2>/dev/null
+    else
+        jq --arg tag "$tag" -r ".inbounds[] | select(.tag == \$tag) | ${field} // empty" "$XRAY_CONFIG" 2>/dev/null
+    fi
 }
 
 _get_meta_field() {
@@ -738,12 +997,43 @@ _get_tag_name() {
     [ -n "$name" ] && printf '%s\n' "$name" || printf '%s\n' "$tag"
 }
 
+_get_inbound_port() {
+    local tag="$1" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    if [ "$protocol" = "anytls_reality" ]; then
+        jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .listen_port // empty' "$SINGBOX_CONFIG" 2>/dev/null
+    else
+        jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .port // empty' "$XRAY_CONFIG" 2>/dev/null
+    fi
+}
+
+_get_inbound_display_protocol() {
+    local tag="$1" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    case "$protocol" in
+        anytls_reality) echo "anytls+reality+raw" ;;
+        *)
+            local proto network security
+            proto=$(_get_inbound_field "$tag" '.protocol')
+            network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
+            security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
+            echo "${proto}+${security}+${network}"
+            ;;
+    esac
+}
+
 _list_tags() {
-    jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+    {
+        jq -r '.inbounds[].tag' "$XRAY_CONFIG" 2>/dev/null
+        jq -r '.inbounds[].tag' "$SINGBOX_CONFIG" 2>/dev/null
+    } | awk 'NF && !seen[$0]++'
 }
 
 _has_nodes() {
-    [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1
+    {
+        [ -f "$XRAY_CONFIG" ] && jq -e '.inbounds | length > 0' "$XRAY_CONFIG" >/dev/null 2>&1 && echo 1
+        [ -f "$SINGBOX_CONFIG" ] && jq -e '.inbounds | length > 0' "$SINGBOX_CONFIG" >/dev/null 2>&1 && echo 1
+    } | grep -q 1
 }
 
 _select_tag() {
@@ -755,7 +1045,7 @@ _select_tag() {
     echo "" >&2
     echo -e "${YELLOW}${prompt}${NC}" >&2
     for tag in "${tags[@]}"; do
-        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))" >&2
+        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_port "$tag"))" >&2
         i=$((i + 1))
     done
     echo -e "  ${RED}[0]${NC} 返回" >&2
@@ -771,19 +1061,35 @@ _select_tag() {
 }
 
 _delete_inbound_by_tag() {
-    local tag="$1"
-    _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
-        _error "删除节点配置失败。"
-        return 1
-    }
+    local tag="$1" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    if [ "$protocol" = "anytls_reality" ]; then
+        _atomic_modify_json "$SINGBOX_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
+            _error "删除节点配置失败。"
+            return 1
+        }
+    else
+        _atomic_modify_json "$XRAY_CONFIG" "del(.inbounds[] | select(.tag == \"$tag\"))" || {
+            _error "删除节点配置失败。"
+            return 1
+        }
+    fi
 }
 
 _update_inbound_port_and_tag() {
-    local tag="$1" new_port="$2" new_tag="$3"
-    _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\"" || {
-        _error "更新节点端口失败。"
-        return 1
-    }
+    local tag="$1" new_port="$2" new_tag="$3" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    if [ "$protocol" = "anytls_reality" ]; then
+        _atomic_modify_json "$SINGBOX_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .listen_port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\" | (.inbounds[] | select(.tag == \"$new_tag\") | .users[0].name) = \"$new_tag\"" || {
+            _error "更新节点端口失败。"
+            return 1
+        }
+    else
+        _atomic_modify_json "$XRAY_CONFIG" "(.inbounds[] | select(.tag == \"$tag\") | .port) = $new_port | (.inbounds[] | select(.tag == \"$tag\") | .tag) = \"$new_tag\"" || {
+            _error "更新节点端口失败。"
+            return 1
+        }
+    fi
 }
 
 _replace_port_in_text() {
@@ -832,12 +1138,68 @@ _protocol_of_tag() {
     _get_meta_field "$1" protocol
 }
 
+_generate_singbox_reality_keys() {
+    local keypair
+    keypair=$($SINGBOX_BIN generate reality-keypair 2>&1)
+    SINGBOX_REALITY_PRIVATE_KEY=$(echo "$keypair" | awk '/PrivateKey/ {print $2}')
+    SINGBOX_REALITY_PUBLIC_KEY=$(echo "$keypair" | awk '/PublicKey/ {print $2}')
+    SINGBOX_REALITY_SHORT_ID=$($SINGBOX_BIN generate rand --hex 8 2>/dev/null)
+    [ -n "$SINGBOX_REALITY_SHORT_ID" ] || SINGBOX_REALITY_SHORT_ID=$(openssl rand -hex 8)
+
+    if [ -z "$SINGBOX_REALITY_PRIVATE_KEY" ] || [ -z "$SINGBOX_REALITY_PUBLIC_KEY" ]; then
+        _error "Sing-box Reality 密钥生成失败。"
+        echo "$keypair" >&2
+        return 1
+    fi
+}
+
+_get_singbox_meta_field() {
+    local tag="$1" field="$2"
+    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
+}
+
+_build_anytls_reality_link() {
+    local tag="$1"
+    local port name password sni public_key short_id server_ip link_ip
+
+    port=$(jq --arg tag "$tag" -r '.inbounds[] | select(.tag == $tag) | .listen_port // empty' "$SINGBOX_CONFIG" 2>/dev/null)
+    [ -n "$port" ] || return 1
+
+    name=$(_get_tag_name "$tag")
+    password=$(_get_singbox_meta_field "$tag" password)
+    sni=$(_get_singbox_meta_field "$tag" sni)
+    public_key=$(_get_singbox_meta_field "$tag" publicKey)
+    short_id=$(_get_singbox_meta_field "$tag" shortId)
+    server_ip=$(_get_singbox_meta_field "$tag" server)
+
+    [ -n "$password" ] || return 1
+    [ -n "$sni" ] || return 1
+    [ -n "$public_key" ] || return 1
+    [ -n "$short_id" ] || return 1
+    [ -n "$server_ip" ] || return 1
+
+    link_ip="$server_ip"
+    [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
+    printf 'anytls=%s:%s, password=%s, over-tls=true, tls-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+        "$link_ip" "$port" "$password" "$sni" "$public_key" "$short_id" "$name"
+}
+
+_finalize_added_singbox_node() {
+    local protocol_label="$1" name="$2" tag="$3"
+    _manage_singbox_service restart
+    _success "${protocol_label} 节点 [${name}] 添加成功。"
+    echo ""
+    echo -e "  ${YELLOW}Quantumult X:${NC} $(_build_anytls_reality_link "$tag")"
+    echo ""
+}
+
 _protocol_name() {
     case "$1" in
         ss2022_reality) echo "SS2022 + Reality" ;;
         trojan_reality) echo "Trojan + Reality" ;;
         vmess_reality) echo "Vmess + Reality" ;;
         vless_vision_reality) echo "VLESS + Vision + Reality" ;;
+        anytls_reality) echo "AnyTLS + Reality" ;;
         *) echo "$1" ;;
     esac
 }
@@ -849,13 +1211,14 @@ _protocol_default_name() {
         trojan_reality) printf 'TROJAN-REALITY-%s\n' "$port" ;;
         vmess_reality) printf 'VMESS-REALITY-%s\n' "$port" ;;
         vless_vision_reality) printf 'VLESS-REALITY-VISION-%s\n' "$port" ;;
+        anytls_reality) printf 'ANYTLS-REALITY-%s\n' "$port" ;;
         *) printf '%s-%s\n' "$protocol" "$port" ;;
     esac
 }
 
 _protocol_validate_supported() {
     case "$1" in
-        ss2022_reality|trojan_reality|vmess_reality|vless_vision_reality) return 0 ;;
+        ss2022_reality|trojan_reality|vmess_reality|vless_vision_reality|anytls_reality) return 0 ;;
         *) _error "暂不支持的协议: $1"; return 1 ;;
     esac
 }
@@ -867,6 +1230,7 @@ _protocol_add_node() {
         trojan_reality) _add_trojan_reality ;;
         vmess_reality) _add_vmess_reality ;;
         vless_vision_reality) _add_vless_vision_reality ;;
+        anytls_reality) _add_anytls_reality ;;
         *) _error "暂不支持的协议: $protocol"; return 1 ;;
     esac
 }
@@ -879,25 +1243,33 @@ _protocol_view_all_nodes() {
 
     echo ""
     echo -e "${YELLOW}══════════════════ Xray 节点列表 ══════════════════${NC}"
-    local count=0 tag protocol port network security name link
+    local count=0 tag port name link display_proto
     while IFS= read -r tag; do
         count=$((count + 1))
-        protocol=$(_get_inbound_field "$tag" '.protocol')
-        port=$(_get_inbound_field "$tag" '.port')
-        network=$(_get_inbound_field "$tag" '.streamSettings.network // "raw"')
-        security=$(_get_inbound_field "$tag" '.streamSettings.security // "none"')
+        port=$(_get_inbound_port "$tag")
         name=$(_get_tag_name "$tag")
         link=$(_get_share_link "$tag")
+        display_proto=$(_get_inbound_display_protocol "$tag")
         echo ""
         echo -e "  ${GREEN}[${count}]${NC} ${CYAN}${name}${NC}"
         echo -e "      类型: ${YELLOW}$(_protocol_name "$(_protocol_of_tag "$tag")")${NC}"
-        echo -e "      协议: ${YELLOW}${protocol}+${security}+${network}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
+        echo -e "      协议: ${YELLOW}${display_proto}${NC}  |  端口: ${GREEN}${port}${NC}  |  标签: ${CYAN}${tag}${NC}"
         if [ -n "$link" ]; then
             echo -e "      ${YELLOW}Quantumult X:${NC} ${link}"
         else
             echo -e "      ${RED}Quantumult X: 无法生成链接${NC}"
         fi
     done < <(_list_tags)
+}
+
+_restart_node_backend() {
+    local tag="$1" protocol
+    protocol=$(_get_meta_field "$tag" protocol)
+    if [ "$protocol" = "anytls_reality" ]; then
+        _manage_singbox_service restart
+    else
+        _manage_xray_service restart
+    fi
 }
 
 _protocol_view_one_node() {
@@ -907,20 +1279,18 @@ _protocol_view_one_node() {
 }
 
 _protocol_view_one_node_by_tag() {
-    local target_tag="$1" protocol port network security name link
+    local target_tag="$1" port name link display_proto
     [ -n "$target_tag" ] || return 1
-    protocol=$(_get_inbound_field "$target_tag" '.protocol')
-    port=$(_get_inbound_field "$target_tag" '.port')
-    network=$(_get_inbound_field "$target_tag" '.streamSettings.network // "raw"')
-    security=$(_get_inbound_field "$target_tag" '.streamSettings.security // "none"')
+    port=$(_get_inbound_port "$target_tag")
     name=$(_get_tag_name "$target_tag")
     link=$(_get_share_link "$target_tag")
+    display_proto=$(_get_inbound_display_protocol "$target_tag")
 
     echo ""
     echo -e "${YELLOW}══════════════════ 节点详情 ══════════════════${NC}"
     echo -e "  名称: ${CYAN}${name}${NC}"
     echo -e "  类型: ${YELLOW}$(_protocol_name "$(_protocol_of_tag "$target_tag")")${NC}"
-    echo -e "  协议: ${YELLOW}${protocol}+${security}+${network}${NC}"
+    echo -e "  协议: ${YELLOW}${display_proto}${NC}"
     echo -e "  端口: ${GREEN}${port}${NC}"
     echo -e "  标签: ${CYAN}${target_tag}${NC}"
     if [ -n "$link" ]; then
@@ -945,7 +1315,7 @@ _protocol_view_nodes() {
     echo ""
     echo -e "${YELLOW}══════════ 查看节点 ══════════${NC}"
     for tag in "${tags[@]}"; do
-        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_field "$tag" '.port'))"
+        echo -e "  ${GREEN}[${i}]${NC} $(_get_tag_name "$tag") (端口: $(_get_inbound_port "$tag"))"
         i=$((i + 1))
     done
     echo -e "  ${GREEN}[a]${NC} 查看全部节点"
@@ -981,7 +1351,7 @@ _protocol_delete_node() {
 
     _delete_inbound_by_tag "$target_tag" || return 1
     _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
-    _manage_xray_service restart
+    _restart_node_backend "$target_tag"
     _success "节点 [${target_name}] 已删除。"
 }
 
@@ -993,7 +1363,7 @@ _protocol_modify_port() {
 
     local target_tag old_port target_name new_port new_tag new_name old_link new_link tmp
     target_tag=$(_select_tag "══════════ 选择要修改端口的节点 ══════════") || return
-    old_port=$(_get_inbound_field "$target_tag" '.port')
+    old_port=$(_get_inbound_port "$target_tag")
     target_name=$(_get_tag_name "$target_tag")
 
     [ -n "$old_port" ] && [ "$old_port" != "null" ] || { _error "未找到目标节点端口。"; return 1; }
@@ -1007,7 +1377,7 @@ _protocol_modify_port() {
     [ -n "$new_tag" ] || new_tag="$target_tag"
     [ -n "$new_name" ] || new_name="$target_name"
 
-    if [ "$new_tag" != "$target_tag" ] && jq -e --arg tag "$new_tag" '.inbounds[] | select(.tag == $tag)' "$XRAY_CONFIG" >/dev/null 2>&1; then
+    if [ "$new_tag" != "$target_tag" ] && _list_tags | grep -Fxq "$new_tag"; then
         _error "修改后的节点标签已存在，请调整节点名称后再试。"
         return 1
     fi
@@ -1024,7 +1394,7 @@ _protocol_modify_port() {
         return 1
     }
 
-    _manage_xray_service restart
+    _restart_node_backend "$new_tag"
     _success "节点 [${new_name}] 端口已改为 ${new_port}。"
 }
 
@@ -1362,6 +1732,84 @@ _add_vless_vision_reality() {
     _finalize_added_node "VLESS+Vision+Reality" "$name" "$tag"
 }
 
+# ===================== 协议实现：AnyTLS + Reality (Sing-box) =====================
+
+_anytls_reality_password() {
+    local custom_password
+    read -p "请输入 AnyTLS 密码 (回车自动生成): " custom_password
+    if [ -n "$custom_password" ]; then
+        printf '%s\n' "$custom_password"
+    else
+        openssl rand -base64 16
+    fi
+}
+
+_build_anytls_reality_inbound() {
+    local tag="$1" port="$2" password="$3" sni="$4" private_key="$5" short_id="$6"
+    jq -n --arg t "$tag" --argjson p "$port" --arg pwd "$password" --arg sn "$sni" --arg pk "$private_key" --arg sid "$short_id" '
+        {
+          "type": "anytls",
+          "tag": $t,
+          "listen_port": $p,
+          "users": [
+            {
+              "name": $t,
+              "password": $pwd
+            }
+          ],
+          "tls": {
+            "enabled": true,
+            "reality": {
+              "enabled": true,
+              "handshake": {
+                "server": $sn,
+                "server_port": 443
+              },
+              "private_key": $pk,
+              "short_id": [
+                $sid
+              ]
+            }
+          }
+        }'
+}
+
+_add_anytls_reality() {
+    local protocol node_ip port sni name tag password inbound qx_link
+    protocol="anytls_reality"
+
+    if [ ! -x "$SINGBOX_BIN" ]; then
+        _warn "AnyTLS + Reality 需要先安装 Sing-box 核心。"
+        _warn "请先执行 [2] 安装/更新 Sing-box 核心。"
+        return 1
+    fi
+
+    node_ip=$(_input_node_ip)
+    port=$(_input_port)
+    sni=$(_input_sni "$DEFAULT_SNI")
+
+    password=$(_anytls_reality_password)
+    _generate_singbox_reality_keys || return 1
+
+    name=$(_input_node_name "$protocol" "$port") || return 1
+    tag="$name"
+
+    _init_singbox_config
+    inbound=$(_build_anytls_reality_inbound "$tag" "$port" "$password" "$sni" "$SINGBOX_REALITY_PRIVATE_KEY" "$SINGBOX_REALITY_SHORT_ID")
+    _atomic_modify_json "$SINGBOX_CONFIG" ".inbounds += [$inbound]" || return 1
+
+    qx_link=$(_build_anytls_reality_link "$tag" 2>/dev/null)
+    _save_meta_bundle "$tag" "$name" "$qx_link" \
+        "protocol=${protocol}" \
+        "password=${password}" \
+        "publicKey=${SINGBOX_REALITY_PUBLIC_KEY}" \
+        "shortId=${SINGBOX_REALITY_SHORT_ID}" \
+        "server=${node_ip}" \
+        "sni=${sni}"
+
+    _finalize_added_singbox_node "AnyTLS+Reality" "$name" "$tag"
+}
+
 # ===================== 预留协议模板（示例） =====================
 
 # 后续新增协议时，按下面模式补充即可：
@@ -1376,19 +1824,24 @@ _add_protocol_menu() {
     local choice
     echo ""
     echo -e "${YELLOW}══════════ 选择要添加的协议 ══════════${NC}"
-    echo -e "  ${GREEN}[1]${NC} SS2022 + Reality"
-    echo -e "  ${GREEN}[2]${NC} Trojan + Reality"
-    echo -e "  ${GREEN}[3]${NC} Vmess + Reality"
-    echo -e "  ${GREEN}[4]${NC} VLESS + Vision + Reality"
+    echo -e " ${CYAN}【Xray 内核协议】${NC}"
+    echo -e "  ${GREEN}[1]${NC} VLESS + Vision + Reality"
+    echo -e "  ${GREEN}[2]${NC} SS2022 + Reality"
+    echo -e "  ${GREEN}[3]${NC} Trojan + Reality"
+    echo -e "  ${GREEN}[4]${NC} Vmess + Reality"
+    echo ""
+    echo -e " ${CYAN}【Sing-box 内核协议】${NC}"
+    echo -e "  ${GREEN}[5]${NC} AnyTLS + Reality"
     echo -e "  ${RED}[0]${NC} 返回"
     echo ""
-    read -p "请选择 [0-4]: " choice
+    read -p "请选择 [0-5]: " choice
 
     case "$choice" in
-        1) _protocol_add_node ss2022_reality ;;
-        2) _protocol_add_node trojan_reality ;;
-        3) _protocol_add_node vmess_reality ;;
-        4) _protocol_add_node vless_vision_reality ;;
+        1) _protocol_add_node vless_vision_reality ;;
+        2) _protocol_add_node ss2022_reality ;;
+        3) _protocol_add_node trojan_reality ;;
+        4) _protocol_add_node vmess_reality ;;
+        5) _protocol_add_node anytls_reality ;;
         0) return 0 ;;
         *) _error "无效输入。"; return 1 ;;
     esac
@@ -1403,20 +1856,24 @@ _xray_menu() {
         echo -e " 当前协议组合: Reality"
         _show_xray_runtime_summary
         echo -e "=================================================="
-        echo -e " ${CYAN}【服务控制】${NC}"
+        echo -e " ${CYAN}【核心管理】${NC}"
         _menu_item 1  "安装/更新 Xray 内核"
-        _menu_item 2  "启动 Xray"
-        _menu_item 3  "停止 Xray"
-        _menu_item 4  "重启 Xray"
+        _menu_item 2  "安装/更新 Sing-box 核心"
+        echo ""
+        echo -e " ${CYAN}【服务控制】${NC}"
+        _menu_item 3  "启动 Xray"
+        _menu_item 4  "停止 Xray"
+        _menu_item 5  "重启 Xray"
         echo ""
         echo -e " ${CYAN}【节点管理】${NC}"
-        _menu_item 5  "添加节点（选择协议）"
-        _menu_item 6  "查看所有节点"
-        _menu_item 7  "删除节点"
-        _menu_item 8  "修改节点端口"
-        _menu_item 9  "更新脚本"
-        _menu_item 10 "设置网络优先级 (IPv4/IPv6)"
+        _menu_item 6  "添加节点（选择协议）"
+        _menu_item 7  "查看所有节点"
+        _menu_item 8  "删除节点"
+        _menu_item 9  "修改节点端口"
+        _menu_item 10 "更新脚本"
+        _menu_item 11 "设置网络优先级 (IPv4/IPv6)"
         echo ""
+        _menu_danger 77 "卸载 Sing-box 内核"
         _menu_danger 88 "卸载 Xray"
         _menu_danger 99 "卸载脚本"
         _menu_exit 0 "退出脚本"
@@ -1425,15 +1882,17 @@ _xray_menu() {
 
         case "$choice" in
             1) _install_or_update_xray; _pause ;;
-            2) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
-            3) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
-            4) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
-            5) _init_xray_config; _add_protocol_menu; _pause ;;
-            6) _protocol_view_nodes; _pause ;;
-            7) _protocol_delete_node; _pause ;;
-            8) _protocol_modify_port; _pause ;;
-            9) _update_script_self; _pause; exit 0 ;;
-            10) _choose_ip_preference ;;
+            2) _install_or_update_singbox; _pause ;;
+            3) [ -f "$XRAY_BIN" ] && _manage_xray_service start; _pause ;;
+            4) [ -f "$XRAY_BIN" ] && _manage_xray_service stop; _pause ;;
+            5) [ -f "$XRAY_BIN" ] && _manage_xray_service restart; _pause ;;
+            6) _init_xray_config; _add_protocol_menu; _pause ;;
+            7) _protocol_view_nodes; _pause ;;
+            8) _protocol_delete_node; _pause ;;
+            9) _protocol_modify_port; _pause ;;
+            10) _update_script_self; _pause; exit 0 ;;
+            11) _choose_ip_preference ;;
+            77) _uninstall_singbox; _pause ;;
             88) _uninstall_xray; _pause ;;
             99) _uninstall_script ;;
             0) exit 0 ;;
