@@ -13,7 +13,7 @@
 
 ## ✨ 功能特性
 
-- 🔐 **支持SS2022 + Reality TroJan +Reality Vmess +Reality 协议** - 新一代安全代理协议，抗封锁能力强
+- 🔐 **支持Anytls+Reality SS2022 + Reality TroJan +Reality Vmess +Reality 协议** - 新一代安全代理协议，抗封锁能力强
 - 🐧 **多发行版支持** - 支持 Alpine (OpenRC)、Debian/Ubuntu (systemd)、CentOS/Rocky/Fedora (systemd) 等
 - 🌐 **双栈 IP 支持** - 支持 IPv4/IPv6 优先级设置，自动检测公网 IP
 - 🛠️ **完整节点管理** - 添加、删除、修改端口、查看节点信息
@@ -100,14 +100,7 @@ udp-over-tcp=sp.v2,
 ```
 ## 更新日志
 
-### v0.0.8
-
-- 默认 log 改为完全关闭
-- outbounds 精简为仅保留 freedom
-- 删除空的 routing.rules
-- 删除 XRAY_LOG 相关冗余逻辑
-- 移除脚本内内存限制逻辑，交由 Xray 自行控制
-- 默认 SNI 改为 support.apple.com 
+### 加入对singbox内核的支持 及anytls+reality协议支持 
 ---
 
 ## License
