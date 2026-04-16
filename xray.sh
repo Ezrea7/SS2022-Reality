@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.2.8"
+SCRIPT_VERSION="0.2.10"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1192,7 +1192,7 @@ _build_anytls_reality_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'anytls=%s:%s, password=%s, over-tls=true, tls-host=%s, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+    printf 'anytls=%s:%s, password=%s, over-tls=true, tls-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
         "$link_ip" "$port" "$password" "$sni" "$public_key" "$short_id" "$name"
 }
 
@@ -1749,7 +1749,7 @@ _build_anytls_reality_inbound() {
         {
           "type": "anytls",
           "tag": $t,
-          "listen": "0.0.0.0",
+          "listen": "::",
           "listen_port": $p,
           "users": [
             {
@@ -1759,6 +1759,7 @@ _build_anytls_reality_inbound() {
           ],
           "tls": {
             "enabled": true,
+            "server_name": $sn,
             "reality": {
               "enabled": true,
               "handshake": {
@@ -1770,7 +1771,18 @@ _build_anytls_reality_inbound() {
                 $sid
               ]
             }
-          }
+          },
+          "padding_scheme": [
+            "stop=8",
+            "0=50-100",
+            "1=150-500",
+            "2=500-1200,c,500-1200,c,500-1200",
+            "3=20-100,500-1200",
+            "4=600-1100",
+            "5=400-900",
+            "6=700-1300",
+            "7=300-800"
+          ]
         }'
 }
 
