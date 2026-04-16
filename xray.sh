@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.2.3"
+SCRIPT_VERSION="0.2.7"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -14,15 +14,15 @@ SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
-XRAY_METADATA="${XRAY_DIR}/metadata.json"
 XRAY_PID_FILE="/tmp/xray.pid"
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
 SINGBOX_PID_FILE="/tmp/sing-box.pid"
+META_DIR="/usr/local/etc/xtls"
+META_FILE="${META_DIR}/metadata.json"
 DEFAULT_SNI="support.apple.com"
 IP_PREF_FILE="${XRAY_DIR}/ip_preference.conf"
-DEFAULT_PROTOCOL="ss2022_reality"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -448,7 +448,8 @@ JSON
         _success "Xray 配置文件已初始化。"
     fi
 
-    [ -s "$XRAY_METADATA" ] || echo '{}' > "$XRAY_METADATA"
+    mkdir -p "$META_DIR"
+    [ -s "$META_FILE" ] || echo '{}' > "$META_FILE"
 }
 
 _create_xray_systemd_service() {
@@ -851,6 +852,10 @@ _cleanup_xray_files() {
 
     rm -f "$XRAY_BIN" "$XRAY_PID_FILE"
     rm -rf "$XRAY_DIR"
+    if [ ! -d "$SINGBOX_DIR" ] || [ -z "$(find "$SINGBOX_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        rm -f "$META_FILE"
+        rmdir "$META_DIR" 2>/dev/null || true
+    fi
 }
 
 _cleanup_singbox_files() {
@@ -867,6 +872,10 @@ _cleanup_singbox_files() {
 
     rm -f "$SINGBOX_BIN" "$SINGBOX_PID_FILE"
     rm -rf "$SINGBOX_DIR"
+    if [ ! -d "$XRAY_DIR" ] || [ -z "$(find "$XRAY_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        rm -f "$META_FILE"
+        rmdir "$META_DIR" 2>/dev/null || true
+    fi
 }
 
 _uninstall_xray() {
@@ -970,19 +979,21 @@ _get_inbound_field() {
 
 _get_meta_field() {
     local tag="$1" field="$2"
-    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
+    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$META_FILE" 2>/dev/null
 }
 
 _set_meta_field() {
     local tag="$1" key="$2" value="$3"
-    _atomic_modify_json "$XRAY_METADATA" ".\"$tag\".\"$key\" = \"$value\"" >/dev/null 2>&1
+    _atomic_modify_json "$META_FILE" ".\"$tag\".\"$key\" = \"$value\"" >/dev/null 2>&1
 }
 
 _save_meta_bundle() {
     local tag="$1" name="$2" link="$3"
     shift 3
 
-    _atomic_modify_json "$XRAY_METADATA" ". + {\"$tag\": {name: \"$name\", qx_link: \"$link\"}}" || return 1
+    mkdir -p "$META_DIR"
+    [ -s "$META_FILE" ] || echo '{}' > "$META_FILE"
+    _atomic_modify_json "$META_FILE" ". + {\"$tag\": {name: \"$name\", qx_link: \"$link\"}}" || return 1
 
     for pair in "$@"; do
         local key="${pair%%=*}" val="${pair#*=}"
@@ -1105,6 +1116,7 @@ _build_protocol_share_link() {
         trojan_reality) _build_trojan_reality_link "$tag" ;;
         vmess_reality) _build_vmess_reality_link "$tag" ;;
         vless_vision_reality) _build_vless_vision_reality_link "$tag" ;;
+        anytls_reality) _build_anytls_reality_link "$tag" ;;
         *) return 1 ;;
     esac
 }
@@ -1155,7 +1167,7 @@ _generate_singbox_reality_keys() {
 
 _get_singbox_meta_field() {
     local tag="$1" field="$2"
-    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$XRAY_METADATA" 2>/dev/null
+    jq --arg tag "$tag" --arg field "$field" -r '.[$tag][$field] // empty' "$META_FILE" 2>/dev/null
 }
 
 _build_anytls_reality_link() {
@@ -1216,15 +1228,8 @@ _protocol_default_name() {
     esac
 }
 
-_protocol_validate_supported() {
-    case "$1" in
-        ss2022_reality|trojan_reality|vmess_reality|vless_vision_reality|anytls_reality) return 0 ;;
-        *) _error "暂不支持的协议: $1"; return 1 ;;
-    esac
-}
-
 _protocol_add_node() {
-    local protocol="${1:-$DEFAULT_PROTOCOL}"
+    local protocol="$1"
     case "$protocol" in
         ss2022_reality) _add_ss2022_reality ;;
         trojan_reality) _add_trojan_reality ;;
@@ -1270,12 +1275,6 @@ _restart_node_backend() {
     else
         _manage_xray_service restart
     fi
-}
-
-_protocol_view_one_node() {
-    local target_tag
-    target_tag=$(_select_tag "══════════ 选择要查看的节点 ══════════") || return
-    _protocol_view_one_node_by_tag "$target_tag"
 }
 
 _protocol_view_one_node_by_tag() {
@@ -1350,7 +1349,7 @@ _protocol_delete_node() {
     _confirm_yes "$confirm" || { _info "已取消。"; return; }
 
     _delete_inbound_by_tag "$target_tag" || return 1
-    _atomic_modify_json "$XRAY_METADATA" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
+    _atomic_modify_json "$META_FILE" "del(.\"$target_tag\")" >/dev/null 2>&1 || true
     _restart_node_backend "$target_tag"
     _success "节点 [${target_name}] 已删除。"
 }
@@ -1387,8 +1386,8 @@ _protocol_modify_port() {
 
     new_link=$(_replace_port_in_text "$old_link" "$old_port" "$new_port")
     [ -n "$new_link" ] || new_link=$(_build_protocol_share_link "$new_tag" 2>/dev/null)
-    tmp="${XRAY_METADATA}.tmp.$$"
-    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l})} | del(.[$ot])' "$XRAY_METADATA" > "$tmp" 2>/dev/null && mv "$tmp" "$XRAY_METADATA" || {
+    tmp="${META_FILE}.tmp.$$"
+    jq --arg ot "$target_tag" --arg nt "$new_tag" --arg n "$new_name" --arg l "$new_link" '. + {($nt): ((.[$ot] // {}) + {name: $n, qx_link: $l})} | del(.[$ot])' "$META_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$META_FILE" || {
         rm -f "$tmp"
         _error "更新节点元数据失败。"
         return 1
@@ -1921,7 +1920,6 @@ _main() {
     _detect_init_system
     _ensure_deps
     _install_script_shortcut
-    _protocol_validate_supported "$DEFAULT_PROTOCOL" || exit 1
     if [ -f "$XRAY_BIN" ]; then
         _init_xray_config
         _create_xray_service >/dev/null 2>&1 || true
