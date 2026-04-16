@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.2.7"
+SCRIPT_VERSION="0.2.8"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1749,6 +1749,7 @@ _build_anytls_reality_inbound() {
         {
           "type": "anytls",
           "tag": $t,
+          "listen": "0.0.0.0",
           "listen_port": $p,
           "users": [
             {
