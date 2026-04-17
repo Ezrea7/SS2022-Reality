@@ -70,7 +70,7 @@ udp-over-tcp=sp.v2, tag=节点名称
 
 ### 节点源数据
 ```
-/usr/local/etc/xray/metadata.json
+/usr/local/etc/xtls/metadata.json
 ```
 
 ### IP优先级配置
