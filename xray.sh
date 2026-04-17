@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.3.12"
+SCRIPT_VERSION="0.3.13"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1503,7 +1503,7 @@ _build_ss2022_reality_link() {
 
     link_ip="$server_ip"
     [[ "$link_ip" == *":"* ]] && link_ip="[$link_ip]"
-    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, tag=%s\n' \
+    printf 'shadowsocks=%s:%s, method=%s, password=%s, obfs=over-tls, obfs-host=%s, tls-verification=true, reality-base64-pubkey=%s, reality-hex-shortid=%s, udp-relay=true, udp-over-tcp=sp.v2, tag=%s\n' \
         "$link_ip" "$port" "$method" "$password" "$sni" "$public_key" "$short_id" "$name"
 }
 
