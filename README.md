@@ -54,12 +54,9 @@ shadowsocks=服务器IP:端口, method=2022-blake3-aes-128-gcm,
 password=密码, obfs=over-tls, obfs-host=伪装域名, 
 tls-verification=true, reality-base64-pubkey=公钥, 
 reality-hex-shortid=短ID, udp-relay=true, 
- tag=节点名称
+udp-over-tcp=sp.v2, tag=节点名称
 ```
-# 如果环境不支持UDP、可在节点名称前加入下面内容、使其UDP流量封装进TCP、
-```
-udp-over-tcp=sp.v2,
-```
+
 ### 推荐客户端：Quantumult X
 #### 如需配置其他客户端请查看脚本内Json配置文件
 
