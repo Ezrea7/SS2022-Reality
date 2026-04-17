@@ -79,7 +79,8 @@ udp-over-tcp=sp.v2, tag=节点名称
 ```
 ## 更新日志
 
-### 加入对singbox内核的支持 及anytls+reality协议支持 
+#### 4.17 vless+Vision+ReaLity协议支持标准分享链接
+#### 4.16 加入对singbox内核的支持 及anytls+reality协议支持 
 ---
 
 ## License
