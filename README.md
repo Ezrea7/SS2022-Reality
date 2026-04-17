@@ -66,6 +66,7 @@ udp-over-tcp=sp.v2, tag=节点名称
 ### 核心配置文件
 ```
 /usr/local/etc/xray/config.json
+/usr/local/etc/singbox/config.json
 ```
 
 ### 节点源数据
