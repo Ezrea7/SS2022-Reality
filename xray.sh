@@ -4,7 +4,7 @@
 #      Xray 协议插件式管理脚本 (骨架版)
 # ============================================================
 
-SCRIPT_VERSION="0.3.10"
+SCRIPT_VERSION="0.3.11"
 SCRIPT_CMD_NAME="xtls"
 SCRIPT_CMD_ALIAS="XTLS"
 SCRIPT_INSTALL_PATH="/usr/local/bin/${SCRIPT_CMD_NAME}"
@@ -1853,7 +1853,18 @@ _build_anytls_reality_inbound() {
                 $sid
               ]
             }
-          }
+          },
+          "padding_scheme": [
+            "stop=8",
+            "0=30-30",
+            "1=100-400",
+            "2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000",
+            "3=9-9,500-1000",
+            "4=500-1000",
+            "5=500-1000",
+            "6=500-1000",
+            "7=500-1000"
+          ]
         }'
 }
 
